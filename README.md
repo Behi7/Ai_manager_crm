@@ -146,3 +146,4 @@ Ai_manager_crm/
 ## 📄 Лицензия
 
 MIT License.
+
