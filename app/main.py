@@ -51,7 +51,7 @@ app = FastAPI(
         "Масштабируемый бэкенд ИИ-менеджера для amoCRM на базе Google Gemini 3.1 Flash Lite. "
         "Асинхронная доставка ответов в чаты мессенджеров через скрытое поле сделки и Salesbot."
     ),
-    version="1.0.0",
+    version="1.0.0-beta",
     lifespan=lifespan
 )
 
