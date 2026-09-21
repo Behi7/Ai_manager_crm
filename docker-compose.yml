@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  ai_postgres:
+    image: postgres:16-alpine
+    container_name: ai_manager_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ai_user
+      POSTGRES_PASSWORD: ai_secure_password_123
+      POSTGRES_DB: ai_manager
+    ports:
+      - "5433:5432"
+    volumes:
+      - ai_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ai_user -d ai_manager"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  ai_redis:
+    image: redis:7-alpine
+    container_name: ai_manager_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --loglevel warning
+    ports:
+      - "6380:6379"
+    volumes:
+      - ai_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  ai_postgres_data:
+  ai_redis_data:
+
