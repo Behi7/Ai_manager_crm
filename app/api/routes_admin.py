@@ -142,7 +142,7 @@ ADMIN_HTML = """<!DOCTYPE html>
                             'bg-amber-400': acc.status === 'awaiting_manual_bot' || acc.status === 'field_created',
                             'bg-rose-400': acc.status === 'error'
                           }"></span>
-                    <span x-text="formatStatus(acc.status)"></span>
+                    <span x-text="formatStatus(acc.status, acc.last_error)"></span>
                   </span>
                 </td>
                 <td class="px-6 py-4 text-xs font-mono text-slate-300">
@@ -306,6 +306,18 @@ ADMIN_HTML = """<!DOCTYPE html>
           <p class="text-xs text-slate-400">Настройка связки Salesbot, фильтра воронок и Экстрактора CRM</p>
         </div>
         <button @click="openSettingsModal = false" class="text-slate-400 hover:text-white text-lg">&times;</button>
+      </div>
+
+      <!-- Alert Banner if Account in Error State -->
+      <div x-show="selectedAccount && (selectedAccount.status === 'error' || selectedAccount.last_error)" class="p-3 bg-rose-950/50 border border-rose-800/60 rounded-xl flex items-start gap-2.5 text-xs text-rose-200">
+        <i class="fa-solid fa-triangle-exclamation text-rose-400 text-sm mt-0.5"></i>
+        <div class="flex-1 space-y-1">
+          <div class="font-semibold text-rose-300">Ошибка подключения к amoCRM:</div>
+          <div x-text="selectedAccount.last_error"></div>
+          <div class="text-[11px] text-rose-400/90 pt-1">
+            Чтобы обновить токен: используйте кнопку «Подключить amoCRM» на главной странице и введите новый токен (или оплатите подписку amoCRM и нажмите кнопку запуска).
+          </div>
+        </div>
       </div>
 
       <!-- Tabs Navigation -->
@@ -474,7 +486,10 @@ ADMIN_HTML = """<!DOCTYPE html>
           navigator.clipboard.writeText(text);
           this.showToast('Скопировано в буфер обмена!');
         },
-        formatStatus(st) {
+        formatStatus(st, lastError) {
+          if (st === 'error') {
+            return lastError || 'Ошибка amoCRM';
+          }
           const map = {
             'pending_validation': 'Проверка токена',
             'field_created': 'Поле создано',
@@ -509,12 +524,15 @@ ADMIN_HTML = """<!DOCTYPE html>
             const data = await res.json();
             if (res.ok) {
               acc.is_active = data.is_active;
+              acc.status = data.status;
+              acc.last_error = data.last_error;
               this.showToast(data.message, acc.is_active ? 'success' : 'error');
             } else {
+              await this.fetchAccounts();
               throw new Error(data.detail || 'Ошибка переключения');
             }
           } catch (e) {
-            this.showToast('Ошибка: ' + e.message, 'error');
+            this.showToast(e.message, 'error');
           }
         },
         async submitAddAccount() {
@@ -596,12 +614,13 @@ ADMIN_HTML = """<!DOCTYPE html>
             const data = await res.json();
             if (res.ok) {
               this.showToast(data.message || 'Связка работает (202 Accepted)!');
-              await this.fetchAccounts();
             } else {
               throw new Error(data.detail || 'Ошибка теста связки');
             }
           } catch (e) {
             this.showToast(e.message, 'error');
+          } finally {
+            await this.fetchAccounts();
           }
         },
         async loadPipelines() {

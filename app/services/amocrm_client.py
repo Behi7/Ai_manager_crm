@@ -8,6 +8,14 @@ import httpx
 logger = logging.getLogger("AmoCRMClient")
 
 
+class AmoCRMAuthOrBillingError(Exception):
+    """Исключение при протухании токена (401) или окончании подписки amoCRM (402/403)"""
+    def __init__(self, status_code: int, detail: str):
+        self.status_code = status_code
+        self.detail = detail
+        super().__init__(f"amoCRM error {status_code}: {detail}")
+
+
 class AmoCRMRateLimiter:
     """Ограничитель частоты запросов к amoCRM (максимум ~7 запросов/сек на аккаунт)"""
     def __init__(self, min_interval: float = 0.15):
@@ -39,6 +47,17 @@ class AmoCRMClient:
             "User-Agent": "AIManager-SaaS/1.0"
         }
 
+    def _check_http_auth_or_billing(self, resp: httpx.Response, subdomain: str):
+        """Проверка на ошибки авторизации (401) или блокировки подписки (402, 403)"""
+        if resp.status_code == 401:
+            err = "Токен amoCRM истёк или отозван (HTTP 401)"
+            logger.error(f"🚨 {err} ({subdomain})")
+            raise AmoCRMAuthOrBillingError(401, err)
+        elif resp.status_code in (402, 403):
+            err = f"Подписка amoCRM закончилась или доступ заблокирован (HTTP {resp.status_code})"
+            logger.error(f"🚨 {err} ({subdomain})")
+            raise AmoCRMAuthOrBillingError(resp.status_code, err)
+
     async def validate_token(self, subdomain: str, token: str) -> Dict[str, Any]:
         """
         Проверка токена и получение информации об аккаунте.
@@ -58,6 +77,8 @@ class AmoCRMClient:
                 }
             elif resp.status_code == 401:
                 return {"is_valid": False, "error": "Неверный поддомен или токен истёк (HTTP 401)"}
+            elif resp.status_code in (402, 403):
+                return {"is_valid": False, "error": f"Подписка amoCRM закончилась или доступ заблокирован (HTTP {resp.status_code})"}
             else:
                 return {"is_valid": False, "error": f"Ошибка amoCRM: HTTP {resp.status_code}"}
 
@@ -70,6 +91,7 @@ class AmoCRMClient:
             # 1. Поиск существующего поля
             get_url = f"https://{subdomain}.amocrm.ru/api/v4/leads/custom_fields?limit=250"
             resp = await client.get(get_url, headers=self._headers(token))
+            self._check_http_auth_or_billing(resp, subdomain)
             if resp.status_code == 200:
                 fields_data = resp.json()
                 for item in fields_data.get("_embedded", {}).get("custom_fields", []):
@@ -87,6 +109,7 @@ class AmoCRMClient:
                 }
             ]
             resp_post = await client.post(post_url, json=payload, headers=self._headers(token))
+            self._check_http_auth_or_billing(resp_post, subdomain)
             if resp_post.status_code in [200, 201]:
                 created_data = resp_post.json()
                 field_id = created_data.get("_embedded", {}).get("custom_fields", [])[0].get("id")
@@ -110,6 +133,7 @@ class AmoCRMClient:
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
                 resp = await client.post(url, json=payload, headers=self._headers(token))
+                self._check_http_auth_or_billing(resp, subdomain)
                 if resp.status_code in [200, 201]:
                     data = resp.json()
                     webhook_id = data.get("id")
@@ -118,6 +142,8 @@ class AmoCRMClient:
                 else:
                     logger.warning(f"Авто-регистрация вебхука вернула HTTP {resp.status_code} ({subdomain})")
                     return None
+            except AmoCRMAuthOrBillingError:
+                raise
             except Exception as e:
                 logger.warning(f"Ошибка авто-регистрации вебхука ({subdomain}): {e}")
                 return None
@@ -131,6 +157,7 @@ class AmoCRMClient:
         url = f"https://{subdomain}.amocrm.ru/api/v4/bots?limit=250"
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.get(url, headers=self._headers(token))
+            self._check_http_auth_or_billing(resp, subdomain)
             if resp.status_code == 200:
                 data = resp.json()
                 items = data.get("_embedded", {}).get("items", [])
@@ -153,6 +180,7 @@ class AmoCRMClient:
         url = f"https://{subdomain}.amocrm.ru/api/v4/leads/pipelines"
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.get(url, headers=self._headers(token))
+            self._check_http_auth_or_billing(resp, subdomain)
             if resp.status_code == 200:
                 data = resp.json()
                 pipelines = data.get("_embedded", {}).get("pipelines", [])
@@ -176,6 +204,7 @@ class AmoCRMClient:
         url = f"https://{subdomain}.amocrm.ru/api/v4/leads/custom_fields?limit=250"
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.get(url, headers=self._headers(token))
+            self._check_http_auth_or_billing(resp, subdomain)
             if resp.status_code == 200:
                 data = resp.json()
                 fields = data.get("_embedded", {}).get("custom_fields", [])
@@ -217,6 +246,7 @@ class AmoCRMClient:
         }
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.patch(url, json=payload, headers=self._headers(t))
+            self._check_http_auth_or_billing(resp, subdomain)
             if resp.status_code in [200, 201]:
                 logger.info(f"💾 Записан ответ в поле #{field_id} сделки #{lead_id} ({subdomain})")
                 return True
@@ -257,6 +287,7 @@ class AmoCRMClient:
         payload = {"custom_fields_values": custom_fields_values}
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.patch(url, json=payload, headers=self._headers(t))
+            self._check_http_auth_or_billing(resp, subdomain)
             if resp.status_code in [200, 201]:
                 logger.info(f"📊 Экстрактор обновил {len(custom_fields_values)} полей в сделке #{lead_id} ({subdomain})")
                 return True
@@ -286,6 +317,7 @@ class AmoCRMClient:
         }
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(url, json=payload, headers=self._headers(t))
+            self._check_http_auth_or_billing(resp, subdomain)
             if resp.status_code == 202:
                 logger.info(f"🤖 Запущен Salesbot #{bot_id} для {entity_type} #{entity_id} ({subdomain})")
                 return True
@@ -324,6 +356,7 @@ class AmoCRMClient:
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(url, json=[task_item], headers=self._headers(t))
+            self._check_http_auth_or_billing(resp, subdomain)
             if resp.status_code in [200, 201]:
                 logger.info(f"🚨 Создана задача оператору по {entity_type} #{eid} ({subdomain})")
                 return True
@@ -338,6 +371,7 @@ class AmoCRMClient:
         url = f"https://{subdomain}.amocrm.ru/api/v4/leads/{lead_id}"
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.get(url, headers=self._headers(t))
+            self._check_http_auth_or_billing(resp, subdomain)
             if resp.status_code == 200:
                 return resp.json()
             return None
@@ -351,6 +385,7 @@ class AmoCRMClient:
             url += f"&filter[pipeline_id]={pipeline_id}"
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.get(url, headers=self._headers(t))
+            self._check_http_auth_or_billing(resp, subdomain)
             if resp.status_code == 200:
                 leads = resp.json().get("_embedded", {}).get("leads", [])
                 if leads:

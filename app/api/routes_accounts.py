@@ -10,7 +10,7 @@ from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.core.security import encrypt_token, decrypt_token
 from app.models.account import Account, AccountStatus, Pipeline, FieldMapping, AIConfig
-from app.services.amocrm_client import amocrm_client
+from app.services.amocrm_client import amocrm_client, AmoCRMAuthOrBillingError
 from app.services.debounce_service import debounce_service
 
 logger = logging.getLogger("AccountsRouter")
@@ -113,7 +113,8 @@ async def create_or_connect_account(payload: CreateAccountRequest):
             account.amo_account_id = amo_account_id
             account.encrypted_token = encrypted_token
             account.ai_reply_field_id = field_id
-            account.status = AccountStatus.FIELD_CREATED
+            account.last_error = None
+            account.is_active = True
 
         account_uuid_str = str(account.id)
         webhook_dest_url = f"{settings.BASE_URL}/webhook/{account_uuid_str}"
@@ -126,7 +127,19 @@ async def create_or_connect_account(payload: CreateAccountRequest):
         else:
             account.webhook_auto_registered = False
 
-        account.status = AccountStatus.AWAITING_MANUAL_BOT
+        if account.webhook_verified:
+            account.status = AccountStatus.VERIFIED
+        elif account.bot_id:
+            account.status = AccountStatus.BOT_LINKED
+        else:
+            account.status = AccountStatus.AWAITING_MANUAL_BOT
+
+        # Очищаем флаг отключения в Redis
+        try:
+            r = await debounce_service.get_redis()
+            await r.delete(f"acc_disabled:{account.id}")
+        except Exception:
+            pass
 
         # Создаем AIConfig по умолчанию, если нет
         cfg_stmt = select(AIConfig).where(AIConfig.account_id == account.id)
@@ -171,6 +184,7 @@ async def list_accounts():
                 "amo_account_id": a.amo_account_id,
                 "status": a.status.value,
                 "is_active": a.is_active,
+                "last_error": a.last_error,
                 "ai_reply_field_id": a.ai_reply_field_id,
                 "bot_id": a.bot_id,
                 "webhook_verified": a.webhook_verified,
@@ -200,6 +214,7 @@ async def get_account_detail(account_id: uuid.UUID):
             "amo_account_id": account.amo_account_id,
             "status": account.status.value,
             "is_active": account.is_active,
+            "last_error": account.last_error,
             "ai_reply_field_id": account.ai_reply_field_id,
             "bot_id": account.bot_id,
             "webhook_auto_registered": account.webhook_auto_registered,
@@ -221,6 +236,7 @@ async def toggle_account_active(account_id: uuid.UUID):
     """
     Переключение активности аккаунта (Старт / Стоп).
     При отключении ИИ перестает отвечать на сообщения данного аккаунта.
+    При включении ("Старт") проверяется валидность токена и доступность amoCRM.
     """
     async with AsyncSessionLocal() as session:
         stmt = select(Account).where(Account.id == account_id)
@@ -228,27 +244,72 @@ async def toggle_account_active(account_id: uuid.UUID):
         if not account:
             raise HTTPException(status_code=404, detail="Аккаунт не найден")
 
-        account.is_active = not account.is_active
-        await session.commit()
+        target_active = not account.is_active
 
-        # Синхронизация с быстрым кэшем в Redis
-        try:
-            r = await debounce_service.get_redis()
-            cache_key = f"acc_disabled:{account.id}"
-            if not account.is_active:
-                await r.set(cache_key, "1")
-            else:
-                await r.delete(cache_key)
-        except Exception as e:
-            logger.warning(f"Не удалось обновить Redis-флаг активности аккаунта {account.id}: {e}")
+        if target_active:
+            # Пользователь нажимает "Старт" - валидируем токен в amoCRM
+            token = decrypt_token(account.encrypted_token)
+            token_check = await amocrm_client.validate_token(account.subdomain, token)
+            if not token_check.get("is_valid"):
+                err_msg = token_check.get("error", "Ошибка авторизации или подписки amoCRM")
+                account.is_active = False
+                account.status = AccountStatus.ERROR
+                account.last_error = err_msg
+                await session.commit()
 
-        logger.info(f"Аккаунт {account.subdomain} переключен: is_active={account.is_active}")
-        return {
-            "success": True,
-            "is_active": account.is_active,
-            "status": "active" if account.is_active else "paused",
-            "message": "Аккаунт запущен (ИИ активен)" if account.is_active else "Аккаунт остановлен (ИИ на паузе)"
-        }
+                try:
+                    r = await debounce_service.get_redis()
+                    await r.set(f"acc_disabled:{account.id}", "1")
+                except Exception:
+                    pass
+
+                raise HTTPException(status_code=400, detail=err_msg)
+
+            account.is_active = True
+            account.last_error = None
+            if account.status == AccountStatus.ERROR:
+                if account.webhook_verified:
+                    account.status = AccountStatus.VERIFIED
+                elif account.bot_id:
+                    account.status = AccountStatus.BOT_LINKED
+                else:
+                    account.status = AccountStatus.AWAITING_MANUAL_BOT
+
+            await session.commit()
+
+            try:
+                r = await debounce_service.get_redis()
+                await r.delete(f"acc_disabled:{account.id}")
+            except Exception as e:
+                logger.warning(f"Не удалось удалить Redis-флаг активности аккаунта {account.id}: {e}")
+
+            logger.info(f"Аккаунт {account.subdomain} запущен: is_active=True")
+            return {
+                "success": True,
+                "is_active": True,
+                "status": account.status.value,
+                "last_error": None,
+                "message": "Аккаунт запущен (ИИ активен)"
+            }
+        else:
+            # Пользователь нажимает "Стоп"
+            account.is_active = False
+            await session.commit()
+
+            try:
+                r = await debounce_service.get_redis()
+                await r.set(f"acc_disabled:{account.id}", "1")
+            except Exception as e:
+                logger.warning(f"Не удалось установить Redis-флаг активности аккаунта {account.id}: {e}")
+
+            logger.info(f"Аккаунт {account.subdomain} остановлен: is_active=False")
+            return {
+                "success": True,
+                "is_active": False,
+                "status": account.status.value,
+                "last_error": account.last_error,
+                "message": "Аккаунт остановлен (ИИ на паузе)"
+            }
 
 
 @router.get("/{account_id}/status")
@@ -278,8 +339,20 @@ async def list_amocrm_bots(account_id: uuid.UUID):
             raise HTTPException(status_code=404, detail="Аккаунт не найден")
 
         token = decrypt_token(account.encrypted_token)
-        bots = await amocrm_client.list_bots(account.subdomain, token)
-        return [{"id": b["id"], "name": b["name"]} for b in bots]
+        try:
+            bots = await amocrm_client.list_bots(account.subdomain, token)
+            return [{"id": b["id"], "name": b["name"]} for b in bots]
+        except AmoCRMAuthOrBillingError as auth_err:
+            account.status = AccountStatus.ERROR
+            account.last_error = auth_err.detail
+            account.is_active = False
+            await session.commit()
+            try:
+                r = await debounce_service.get_redis()
+                await r.set(f"acc_disabled:{account.id}", "1")
+            except Exception:
+                pass
+            raise HTTPException(status_code=400, detail=auth_err.detail)
 
 
 @router.post("/{account_id}/link-bot")
@@ -327,53 +400,65 @@ async def test_bot_connection(account_id: uuid.UUID, payload: Optional[TestConne
         lead_id = payload.lead_id if payload and payload.lead_id else None
         lead_pipeline_name = ""
 
-        # Если ID сделки не передан, ищем сделку в одной из включенных воронок
-        if not lead_id:
-            enabled_pipes = [p for p in account.pipelines if p.is_enabled]
-            lead_obj = None
-            for ep in enabled_pipes:
-                lead_obj = await amocrm_client.get_latest_lead(subdomain, token, pipeline_id=ep.amo_pipeline_id)
+        try:
+            # Если ID сделки не передан, ищем сделку в одной из включенных воронок
+            if not lead_id:
+                enabled_pipes = [p for p in account.pipelines if p.is_enabled]
+                lead_obj = None
+                for ep in enabled_pipes:
+                    lead_obj = await amocrm_client.get_latest_lead(subdomain, token, pipeline_id=ep.amo_pipeline_id)
+                    if lead_obj:
+                        lead_pipeline_name = ep.name
+                        break
+
+                if not lead_obj:
+                    lead_obj = await amocrm_client.get_latest_lead(subdomain, token)
+
                 if lead_obj:
-                    lead_pipeline_name = ep.name
-                    break
+                    lead_id = lead_obj.get("id")
 
-            if not lead_obj:
-                lead_obj = await amocrm_client.get_latest_lead(subdomain, token)
+            if not lead_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="В amoCRM не найдено ни одной сделки для проверки. Создайте сделку или укажите lead_id явно."
+                )
 
-            if lead_obj:
-                lead_id = lead_obj.get("id")
+            # 1. Запись проверочного ответа в поле сделки
+            test_msg = "Тестовое сообщение от ИИ: связка работает корректно!"
+            patch_ok = await amocrm_client.patch_lead_field(
+                subdomain=subdomain,
+                access_token=token,
+                lead_id=lead_id,
+                field_id=account.ai_reply_field_id,
+                value=test_msg
+            )
+            if not patch_ok:
+                raise HTTPException(status_code=500, detail=f"Не удалось записать тестовое значение в поле {account.ai_reply_field_id} сделки {lead_id}")
 
-        if not lead_id:
-            raise HTTPException(
-                status_code=400,
-                detail="В amoCRM не найдено ни одной сделки для проверки. Создайте сделку или укажите lead_id явно."
+            # 2. Запуск бота
+            bot_ok = await amocrm_client.run_salesbot(
+                subdomain=subdomain,
+                access_token=token,
+                bot_id=account.bot_id,
+                entity_id=lead_id
             )
 
-        # 1. Запись проверочного ответа в поле сделки
-        test_msg = "Тестовое сообщение от ИИ: связка работает корректно!"
-        patch_ok = await amocrm_client.patch_lead_field(
-            subdomain=subdomain,
-            access_token=token,
-            lead_id=lead_id,
-            field_id=account.ai_reply_field_id,
-            value=test_msg
-        )
-        if not patch_ok:
-            raise HTTPException(status_code=500, detail=f"Не удалось записать тестовое значение в поле {account.ai_reply_field_id} сделки {lead_id}")
-
-        # 2. Запуск бота
-        bot_ok = await amocrm_client.run_salesbot(
-            subdomain=subdomain,
-            access_token=token,
-            bot_id=account.bot_id,
-            entity_id=lead_id
-        )
-
-        if not bot_ok:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Не удалось запустить Salesbot {account.bot_id} (API вернул статус, отличный от 202 Accepted)"
-            )
+            if not bot_ok:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Не удалось запустить Salesbot {account.bot_id} (API вернул статус, отличный от 202 Accepted)"
+                )
+        except AmoCRMAuthOrBillingError as auth_err:
+            account.status = AccountStatus.ERROR
+            account.last_error = auth_err.detail
+            account.is_active = False
+            await session.commit()
+            try:
+                r = await debounce_service.get_redis()
+                await r.set(f"acc_disabled:{account.id}", "1")
+            except Exception:
+                pass
+            raise HTTPException(status_code=400, detail=auth_err.detail)
 
         pipeline_info = f" (воронка «{lead_pipeline_name}»)" if lead_pipeline_name else ""
         return {
@@ -394,7 +479,19 @@ async def get_account_pipelines(account_id: uuid.UUID):
             raise HTTPException(status_code=404, detail="Аккаунт не найден")
 
         token = decrypt_token(account.encrypted_token)
-        amo_pipelines = await amocrm_client.list_pipelines(account.subdomain, token)
+        try:
+            amo_pipelines = await amocrm_client.list_pipelines(account.subdomain, token)
+        except AmoCRMAuthOrBillingError as auth_err:
+            account.status = AccountStatus.ERROR
+            account.last_error = auth_err.detail
+            account.is_active = False
+            await session.commit()
+            try:
+                r = await debounce_service.get_redis()
+                await r.set(f"acc_disabled:{account.id}", "1")
+            except Exception:
+                pass
+            raise HTTPException(status_code=400, detail=auth_err.detail)
 
         # Синхронизация с БД
         existing_map = {p.amo_pipeline_id: p for p in account.pipelines}
@@ -465,7 +562,19 @@ async def get_account_fields(account_id: uuid.UUID):
             raise HTTPException(status_code=404, detail="Аккаунт не найден")
 
         token = decrypt_token(account.encrypted_token)
-        amo_fields = await amocrm_client.list_custom_fields(account.subdomain, token)
+        try:
+            amo_fields = await amocrm_client.list_custom_fields(account.subdomain, token)
+        except AmoCRMAuthOrBillingError as auth_err:
+            account.status = AccountStatus.ERROR
+            account.last_error = auth_err.detail
+            account.is_active = False
+            await session.commit()
+            try:
+                r = await debounce_service.get_redis()
+                await r.set(f"acc_disabled:{account.id}", "1")
+            except Exception:
+                pass
+            raise HTTPException(status_code=400, detail=auth_err.detail)
 
         existing_map = {fm.amo_field_id: fm for fm in account.field_mappings}
         for af in amo_fields:

@@ -234,14 +234,14 @@ async def handle_amocrm_webhook(account_uuid: uuid.UUID, request: Request):
         attachment=msg.get("attachment")
     )
 
-    # Запустить таймер дебаунса (1.8 сек)
+    # Запустить таймер дебаунса (2.5 сек)
     debounce_service.schedule_debounce(
         account_id=str(account_uuid),
         lead_id=lead_id,
         callback=delivery_service.process_lead_after_debounce,
-        delay=1.8
+        delay=2.5
     )
 
-    logger.info(f"Сообщение {msg['id']} лида {lead_id} принято в обработку (дебаунс 1.8с)")
+    logger.info(f"Сообщение {msg['id']} лида {lead_id} принято в обработку (дебаунс 2.5с)")
     return {"status": "ok"}
 

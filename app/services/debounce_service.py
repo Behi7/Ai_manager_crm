@@ -88,6 +88,17 @@ class DebounceService:
             "attachments": attachments
         }
 
+    async def has_buffered_messages(self, account_id: str, lead_id: str) -> bool:
+        """Проверка наличия ожидающих сообщений в буфере лида"""
+        try:
+            r = await self.get_redis()
+            key = f"debounce_msgs:{account_id}:{lead_id}"
+            count = await r.llen(key)
+            return count > 0
+        except Exception as e:
+            logger.warning(f"Ошибка проверки буфера сообщений {account_id}:{lead_id}: {e}")
+            return False
+
     async def acquire_lead_lock(self, account_id: str, lead_id: str, ttl: int = 90) -> bool:
         """
         Захват мьютекса LEAD_BUSY на время выполнения генерации и записи.
@@ -120,7 +131,7 @@ class DebounceService:
         account_id: str,
         lead_id: str,
         callback: Callable[[str, str], Coroutine],
-        delay: float = 1.8
+        delay: float = 2.5
     ):
         """
         Умный таймер дебаунса: если клиент присылает сообщение, таймер сбрасывается.

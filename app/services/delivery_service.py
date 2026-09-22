@@ -11,7 +11,7 @@ from app.core.security import decrypt_token
 from app.models.account import Account, AccountStatus
 from app.models.lead import Lead, ConversationMessage
 from app.models.extraction import ExtractionLog
-from app.services.amocrm_client import amocrm_client
+from app.services.amocrm_client import amocrm_client, AmoCRMAuthOrBillingError
 from app.services.debounce_service import debounce_service
 from app.services.llm_communicator import communicator
 from app.services.llm_extractor import extractor
@@ -33,7 +33,16 @@ class DeliveryService:
         """
         lock_acquired = await debounce_service.acquire_lead_lock(account_id_str, lead_id_str)
         if not lock_acquired:
-            logger.info(f"Лид {lead_id_str} аккаунта {account_id_str} уже обрабатывается (LEAD_BUSY). Сообщения в буфере.")
+            logger.info(
+                f"Лид {lead_id_str} аккаунта {account_id_str} уже обрабатывается (LEAD_BUSY). "
+                f"Откладываем запуск на 1.0с..."
+            )
+            debounce_service.schedule_debounce(
+                account_id=account_id_str,
+                lead_id=lead_id_str,
+                callback=self.process_lead_after_debounce,
+                delay=1.0
+            )
             return
 
         try:
@@ -366,11 +375,45 @@ class DeliveryService:
                         # Если данные не удалось извлечь и клиент пишет короткие/непонятные фразы
                         pass
 
+        except AmoCRMAuthOrBillingError as auth_err:
+            logger.error(f"🚨 Ошибка авторизации/подписки amoCRM: {auth_err.detail}")
+            try:
+                async with AsyncSessionLocal() as session:
+                    acc_stmt = select(Account).where(Account.id == account_uuid)
+                    acc_obj = (await session.execute(acc_stmt)).scalar_one_or_none()
+                    if acc_obj:
+                        acc_obj.status = AccountStatus.ERROR
+                        acc_obj.last_error = auth_err.detail
+                        acc_obj.is_active = False
+                        await session.commit()
+
+                # Устанавливаем флаг acc_disabled в Redis, чтобы входящие вебхуки не тратили ресурсы
+                r_redis = await debounce_service.get_redis()
+                await r_redis.set(f"acc_disabled:{account_id_str}", "1")
+                logger.warning(f"🛑 Аккаунт {account_id_str} переведен в статус ERROR и остановлен (is_active=False).")
+            except Exception as save_err:
+                logger.exception(f"Ошибка сохранения статуса ERROR для аккаунта {account_id_str}: {save_err}")
         except Exception as e:
             logger.exception(f"Непредвиденная ошибка в process_lead_after_debounce: {e}")
         finally:
-            # Лок снимается только после завершения и чата, и экстрактора
+            # 1. Лок снимается только после завершения и чата, и экстрактора
             await debounce_service.release_lead_lock(account_id_str, lead_id_str)
+
+            # 2. Проверяем, не нападали ли новые сообщения в буфер, пока ИИ генерировал ответ
+            try:
+                if await debounce_service.has_buffered_messages(account_id_str, lead_id_str):
+                    logger.info(
+                        f"Обнаружены новые сообщения в буфере лида {lead_id_str} "
+                        f"(пришли во время генерации ответа). Запускаем обработку следующего пакета через 0.5с..."
+                    )
+                    debounce_service.schedule_debounce(
+                        account_id=account_id_str,
+                        lead_id=lead_id_str,
+                        callback=self.process_lead_after_debounce,
+                        delay=0.5
+                    )
+            except Exception as ex:
+                logger.error(f"Ошибка проверки буфера сообщений лида {lead_id_str}: {ex}")
 
 
 delivery_service = DeliveryService()
