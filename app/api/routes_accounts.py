@@ -57,6 +57,8 @@ class UpdateAIConfigRequest(BaseModel):
     extractor_model: Optional[str] = None
     temperature: Optional[float] = None
     handover_after_stuck: Optional[int] = None
+    knowledge_base: Optional[str] = None
+    knowledge_mode: Optional[str] = None
 
 
 # --- Endpoints ---
@@ -698,13 +700,16 @@ async def get_ai_config(account_id: uuid.UUID):
             "communicator_model": cfg.communicator_model,
             "extractor_model": cfg.extractor_model,
             "temperature": float(cfg.temperature),
-            "handover_after_stuck": cfg.handover_after_stuck
+            "handover_after_stuck": cfg.handover_after_stuck,
+            "knowledge_base": cfg.knowledge_base or "",
+            "knowledge_mode": cfg.knowledge_mode or "plain_text",
+            "gemini_cache_name": cfg.gemini_cache_name
         }
 
 
 @router.patch("/{account_id}/ai-config")
 async def update_ai_config(account_id: uuid.UUID, payload: UpdateAIConfigRequest):
-    """Обновление настроек ИИ (системный промпт, модели, температура, лимит застревания)"""
+    """Обновление настроек ИИ (системный промпт, модели, температура, база знаний)"""
     async with AsyncSessionLocal() as session:
         stmt = select(AIConfig).where(AIConfig.account_id == account_id)
         cfg = (await session.execute(stmt)).scalar_one_or_none()
@@ -722,6 +727,13 @@ async def update_ai_config(account_id: uuid.UUID, payload: UpdateAIConfigRequest
             cfg.temperature = payload.temperature
         if payload.handover_after_stuck is not None:
             cfg.handover_after_stuck = payload.handover_after_stuck
+        if payload.knowledge_base is not None:
+            if cfg.knowledge_base != payload.knowledge_base:
+                cfg.gemini_cache_name = None
+                cfg.gemini_cache_expires_at = None
+            cfg.knowledge_base = payload.knowledge_base
+        if payload.knowledge_mode is not None:
+            cfg.knowledge_mode = payload.knowledge_mode
 
         await session.commit()
         return {"success": True, "message": "Настройки ИИ успешно обновлены"}

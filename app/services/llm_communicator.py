@@ -57,6 +57,9 @@ class LLMCommunicator:
         media_parts: Optional[List[Dict[str, Any]]] = None,
         target_fields: Optional[List[Dict[str, str]]] = None,
         known_fields: Optional[Dict[str, Any]] = None,
+        knowledge_base: Optional[str] = None,
+        knowledge_mode: str = "plain_text",
+        gemini_cache_name: Optional[str] = None,
     ) -> CommunicatorResponse:
         """
         Генерация ответа клиенту на основе истории сообщений, мультимодальных вложений
@@ -129,8 +132,27 @@ class LLMCommunicator:
                 "5. Если в аудио/видео клиент явно просит позвать человека/оператора/менеджера, добавь в конце ответа маркер [[HANDOVER]]."
             )
 
+        # 3. Формирование блока Базы знаний и каталога продуктов
+        knowledge_instruction = ""
+        has_active_cache = bool(gemini_cache_name and knowledge_mode == "gemini_cache")
+
+        if knowledge_base and knowledge_mode != "disabled" and not has_active_cache:
+            knowledge_instruction = (
+                "\n\nБАЗА ЗНАНИЙ И КАТАЛОГ ПРОДУКТОВ КОМПАНИИ:\n"
+                "-----------------------------------------\n"
+                f"{knowledge_base.strip()}\n"
+                "-----------------------------------------\n"
+                "ПРАВИЛА ИСПОЛЬЗОВАНИЯ КАТАЛОГА И РЕКОМЕНДАЦИЙ:\n"
+                "1. Этот каталог — твоя внутренняя экспертная база знаний. Используй её для точных ответов на вопросы о товарах, услугах, тарифах и ценах.\n"
+                "2. СТРОГИЙ ЗАПРЕТ НА СПАМ КАТАЛОГОМ: Если клиент просто поздоровался ('Привет', 'Добрый день', 'Здравствуйте') или ещё не описал свою задачу — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО вываливать каталог или перечислять товары! Просто вежливо поздоровайся и спроси, чем можешь помочь.\n"
+                "3. ТОЧЕЧНАЯ РЕКОМЕНДАЦИЯ: Рекомендуй конкретный продукт (1, максимум 2 подходящих варианта) ТОЛЬКО тогда, когда клиент сам спросил о товарах/ценах или когда в ходе диалога стали понятны его потребности.\n"
+                "4. ОБОСНОВАНИЕ ВЫГОДЫ: Предлагая продукт, кратко поясни, почему именно он подходит клиенту (например: 'Для вашей команды из 8 человек оптимален тариф X, так как в него уже включена интеграция WhatsApp').\n"
+                "5. ТОЧНОСТЬ: Называй цены и характеристики строго из базы знаний выше. Запрещено выдумывать несуществующие скидки, акции или товары."
+            )
+
         full_system_instruction = (
             f"{system_prompt}\n"
+            f"{knowledge_instruction}"
             f"{known_info}"
             f"{qualification_instruction}"
             f"{media_instruction}\n\n"
@@ -190,16 +212,20 @@ class LLMCommunicator:
                     }
                 })
 
-        body = {
-            "systemInstruction": {
-                "parts": [{"text": full_system_instruction}]
-            },
+        body: Dict[str, Any] = {
             "contents": combined_contents,
             "generationConfig": {
                 "temperature": float(temperature),
                 "maxOutputTokens": 400
             }
         }
+
+        if has_active_cache:
+            body["cachedContent"] = gemini_cache_name
+        else:
+            body["systemInstruction"] = {
+                "parts": [{"text": full_system_instruction}]
+            }
 
         url = GEMINI_API_URL.format(model=model_name)
         params = {"key": self.api_key}
@@ -254,6 +280,58 @@ class LLMCommunicator:
                 is_handover_requested=is_handover,
                 error=str(e)
             )
+
+    async def create_gemini_context_cache(
+        self,
+        model_name: str,
+        system_instruction: str,
+        knowledge_content: str,
+        ttl_seconds: int = 3600
+    ) -> Optional[str]:
+        """
+        Создание или обновление кэша контекста (CachedContent) в Google Gemini API.
+        Возвращает имя кэша (например, 'cachedContents/abc123xyz') или None при недостатке токенов (<32k) или ошибке.
+        """
+        if not self.api_key or not knowledge_content:
+            return None
+
+        clean_model = model_name
+        if not clean_model.startswith("models/"):
+            clean_model = f"models/{clean_model}"
+
+        url = "https://generativelanguage.googleapis.com/v1beta/cachedContents"
+        params = {"key": self.api_key}
+        payload = {
+            "model": clean_model,
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": f"БАЗА ЗНАНИЙ И КАТАЛОГ ПРОДУКТОВ:\n{knowledge_content}"}]
+                }
+            ],
+            "systemInstruction": {
+                "parts": [{"text": system_instruction}]
+            },
+            "ttl": f"{ttl_seconds}s"
+        }
+
+        try:
+            client = await gemini_http_client.get_client()
+            resp = await client.post(url, params=params, json=payload)
+            if resp.status_code == 200:
+                data = resp.json()
+                cache_name = data.get("name")
+                logger.info(f"Успешно создан Gemini Context Cache: {cache_name}")
+                return cache_name
+            else:
+                logger.info(
+                    f"Gemini Context Cache не создан (HTTP {resp.status_code}): {resp.text[:150]}. "
+                    "Будет использован надёжный прямой In-Context режим."
+                )
+                return None
+        except Exception as err:
+            logger.warning(f"Ошибка при создании Gemini Context Cache: {err}")
+            return None
 
 
 communicator = LLMCommunicator()

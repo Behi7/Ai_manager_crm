@@ -323,6 +323,9 @@ class DeliveryService:
         comm_model = ai_config.communicator_model if ai_config else "gemini-3.1-flash-lite"
         temperature = float(ai_config.temperature) if ai_config else 0.4
         handover_limit = ai_config.handover_after_stuck if ai_config else 4
+        knowledge_base = ai_config.knowledge_base if ai_config else None
+        knowledge_mode = ai_config.knowledge_mode if ai_config else "plain_text"
+        gemini_cache_name = ai_config.gemini_cache_name if ai_config else None
 
         # -------------------------------------------------------------
         # 1. КРИТИЧЕСКИЙ ПУТЬ: Генерация ответа и отправка в мессенджер
@@ -334,7 +337,10 @@ class DeliveryService:
             temperature=temperature,
             media_parts=media_parts,
             target_fields=target_fields,
-            known_fields=known_fields
+            known_fields=known_fields,
+            knowledge_base=knowledge_base,
+            knowledge_mode=knowledge_mode,
+            gemini_cache_name=gemini_cache_name
         )
 
         # Если Gemini распознал медиафайл и вернул выжимку/транскрипцию, обогащаем запись в БД

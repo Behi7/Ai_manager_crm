@@ -415,8 +415,48 @@ ADMIN_HTML = """<!DOCTYPE html>
       <div x-show="activeTab === 'ai'" class="space-y-4 flex-1 overflow-y-auto pr-1">
         <div>
           <label class="block text-xs font-medium text-slate-300 mb-1">Системный промпт Общителя</label>
-          <textarea x-model="aiConfig.communicator_prompt" rows="5" class="w-full bg-slate-800 border border-slate-700 rounded-xl p-3 text-xs text-slate-200 outline-none focus:border-indigo-500"></textarea>
+          <textarea x-model="aiConfig.communicator_prompt" rows="4" class="w-full bg-slate-800 border border-slate-700 rounded-xl p-3 text-xs text-slate-200 outline-none focus:border-indigo-500"></textarea>
         </div>
+
+        <!-- Секция: База знаний и каталог продуктов -->
+        <div class="p-3.5 bg-slate-800/80 border border-slate-700 rounded-xl space-y-3">
+          <div class="flex items-center justify-between">
+            <label class="text-xs font-semibold text-indigo-300 flex items-center gap-1.5">
+              <i class="fa-solid fa-book-bookmark text-indigo-400"></i> Каталог продуктов и База знаний
+            </label>
+            <span class="text-[11px] text-slate-400" x-show="aiConfig.knowledge_base">
+              Символов: <span class="font-mono text-indigo-300" x-text="aiConfig.knowledge_base.length"></span>
+            </span>
+          </div>
+
+          <div class="space-y-1">
+            <label class="block text-[11px] font-medium text-slate-300">Режим работы с каталогом продуктов:</label>
+            <select x-model="aiConfig.knowledge_mode" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white outline-none focus:border-indigo-500">
+              <option value="plain_text">Простой текст в промпте (In-Context) — до 50 товаров/услуг</option>
+              <option value="gemini_cache">Google Gemini Context Caching (Большой каталог >32k токенов)</option>
+              <option value="disabled">Отключено (без каталога)</option>
+            </select>
+          </div>
+
+          <div x-show="aiConfig.knowledge_mode !== 'disabled'" class="space-y-2">
+            <label class="block text-[11px] font-medium text-slate-300">Описание товаров, услуг, цен и условий:</label>
+            <textarea x-model="aiConfig.knowledge_base" rows="5"
+                      placeholder="### Товар 1: Название&#10;- Цена: 25 000 руб.&#10;- Для кого: Малый бизнес&#10;- Что входит: Описание продукта...&#10;- Триггер для рекомендации: Если клиент спрашивает про автоматизацию...&#10;&#10;### Товар 2: Название...&#10;- Цена: 50 000 руб."
+                      class="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs font-mono text-slate-200 outline-none focus:border-indigo-500"></textarea>
+
+            <div class="p-2.5 bg-indigo-950/40 border border-indigo-800/40 rounded-lg text-[11px] text-indigo-200 space-y-1">
+              <div class="font-medium text-indigo-300 flex items-center gap-1">
+                <i class="fa-solid fa-circle-info"></i> Как ИИ использует эту базу:
+              </div>
+              <div>• На обычные приветствия («Привет», «Здравствуйте») каталог <strong>НЕ вываливается</strong>.</div>
+              <div>• ИИ рекомендует конкретный продукт только тогда, когда клиент сам спросил о ценах/товарах или когда в ходе диалога стали понятны его потребности.</div>
+              <div x-show="aiConfig.knowledge_mode === 'gemini_cache'" class="text-amber-300 pt-1">
+                <i class="fa-solid fa-bolt text-amber-400"></i> Режим Gemini Cache: для кэширования в Google TPU требуется от ~32k токенов. При меньшем объёме система автоматически передаст текст напрямую в промпт без ошибок.
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div class="grid grid-cols-2 gap-3">
           <div>
             <label class="block text-xs font-medium text-slate-300 mb-1">Модель Общителя</label>
@@ -675,7 +715,10 @@ ADMIN_HTML = """<!DOCTYPE html>
         async loadAIConfig() {
           try {
             const res = await fetch(`/accounts/${this.selectedAccount.id}/ai-config`);
-            this.aiConfig = await res.json();
+            const data = await res.json();
+            if (!data.knowledge_mode) data.knowledge_mode = 'plain_text';
+            if (!data.knowledge_base) data.knowledge_base = '';
+            this.aiConfig = data;
           } catch (e) {}
         },
         async saveAIConfig() {

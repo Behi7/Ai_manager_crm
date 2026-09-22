@@ -140,6 +140,10 @@ class AIConfig(Base):
     extractor_model: Mapped[str] = mapped_column(String(100), default="gemini-3.1-flash-lite", nullable=False)
     temperature: Mapped[float] = mapped_column(Numeric(3, 2), default=0.4, nullable=False)
     handover_after_stuck: Mapped[int] = mapped_column(Integer, default=4, nullable=False)
+    knowledge_base: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    knowledge_mode: Mapped[str] = mapped_column(String(50), default="plain_text", nullable=False)
+    gemini_cache_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    gemini_cache_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     account: Mapped["Account"] = relationship("Account", back_populates="ai_config")
 
