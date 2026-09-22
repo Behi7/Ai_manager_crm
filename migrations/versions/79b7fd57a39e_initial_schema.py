@@ -47,7 +47,7 @@ def upgrade() -> None:
         sa.Column('token_expires_at', sa.DateTime(timezone=True), nullable=True),
         sa.Column(
             'status',
-            sa.Enum(
+            postgresql.ENUM(
                 'pending_validation',
                 'field_created',
                 'awaiting_manual_bot',
