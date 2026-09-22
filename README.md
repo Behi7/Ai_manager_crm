@@ -42,7 +42,7 @@
 - **Backend**: Python 3.11+, FastAPI, Uvicorn, Pydantic v2
 - **База данных**: PostgreSQL 16 (asyncpg, SQLAlchemy 2.0 Async, Alembic)
 - **Кэш и очереди**: Redis 7
-- **Нейросеть / LLM**: Google Gemini 2.5 Flash API (multimodal)
+- **Нейросеть / LLM**: Google Gemini API (multimodal)
 - **Безопасность**: Cryptography (Fernet symmetric encryption)
 - **Контейнеризация**: Docker, Docker Compose
 
