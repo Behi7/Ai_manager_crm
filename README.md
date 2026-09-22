@@ -1,8 +1,20 @@
-# Ai_manager_crm
+# Ai_manager_crm — Автономный AI-агент для amoCRM и Kommo
 
-Интеллектуальный ИИ-ассистент и менеджер квалификации для amoCRM на базе FastAPI, Redis, PostgreSQL и Google Gemini.
+<p align="left">
+  <img src="https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white" alt="Python" />
+  <img src="https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white" alt="FastAPI" />
+  <img src="https://img.shields.io/badge/LLM-Google%20Gemini-4285F4?logo=google&logoColor=white" alt="Google Gemini" />
+  <img src="https://img.shields.io/badge/CRM-amoCRM%20%2F%20Kommo-FF3B30" alt="amoCRM / Kommo" />
+  <img src="https://img.shields.io/badge/Redis-Debounce%20Queue-DC382D?logo=redis&logoColor=white" alt="Redis" />
+  <img src="https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white" alt="PostgreSQL" />
+  <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT" />
+</p>
 
-Сервис автоматически обрабатывает входящие сообщения от клиентов, ведет естественный диалог, защищен от prompt-инъекций, производит поэтапную квалификацию лидов и обновляет данные в amoCRM (сделки, кастомные поля, примечания).
+**Ai_manager_crm** — полнофункциональный автономный **AI-агент (ИИ-менеджер по продажам)** и квалификатор лидов для **amoCRM** и **Kommo CRM** на базе **FastAPI**, **Redis**, **PostgreSQL** и **Google Gemini API**.
+
+> 🇬🇧 **English Summary**: Autonomous AI Sales Agent & Lead Qualifier for amoCRM / Kommo CRM powered by Google Gemini, FastAPI, and Redis. Features real-time webhook processing, debounced message aggregation, Salesbot triggering, automatic custom field extraction, multimodal chat processing (voice/images), and built-in anti-prompt-injection safeguards.
+
+Сервис автоматически обрабатывает входящие сообщения от клиентов из любых подключенных к CRM мессенджеров (Telegram, WhatsApp, Instagram, VK, онлайн-чат), ведет естественный диалог, защищен от prompt-инъекций, квалифицирует лидов по этапам воронки и заполняет кастомные поля сделок в amoCRM / Kommo.
 
 ---
 
