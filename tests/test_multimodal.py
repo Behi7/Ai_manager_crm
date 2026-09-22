@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import json
 import unittest
 from urllib.parse import urlencode

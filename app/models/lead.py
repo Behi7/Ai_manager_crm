@@ -1,6 +1,10 @@
 import uuid
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
+
+if TYPE_CHECKING:
+    from app.models.account import Account
+    from app.models.extraction import ExtractionLog
 from sqlalchemy import (
     String, Text, Boolean, BigInteger, DateTime,
     ForeignKey, UniqueConstraint, Index

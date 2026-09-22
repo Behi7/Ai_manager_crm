@@ -1,7 +1,10 @@
 import enum
 import uuid
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
+
+if TYPE_CHECKING:
+    from app.models.lead import Lead
 from sqlalchemy import (
     String, Text, Boolean, BigInteger, LargeBinary,
     Numeric, Integer, DateTime, ForeignKey, Enum as SQLEnum, UniqueConstraint
