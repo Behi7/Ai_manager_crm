@@ -56,7 +56,8 @@ def upgrade() -> None:
                 'configured',
                 'verified',
                 'error',
-                name='account_status'
+                name='account_status',
+                create_type=False
             ),
             nullable=False
         ),
