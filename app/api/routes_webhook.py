@@ -5,7 +5,7 @@ import uuid
 from typing import Optional, Dict, Any
 from urllib.parse import parse_qs
 
-from fastapi import APIRouter, Request, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Request, BackgroundTasks
 from sqlalchemy import select
 
 from app.core.database import AsyncSessionLocal

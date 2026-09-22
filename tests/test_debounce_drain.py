@@ -1,6 +1,5 @@
-import asyncio
 import unittest
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, patch
 from app.services.debounce_service import DebounceService
 from app.services.delivery_service import DeliveryService
 

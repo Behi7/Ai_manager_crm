@@ -2,7 +2,6 @@ import json
 import logging
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
-import httpx
 from app.core.config import settings
 from app.services.gemini_client import gemini_http_client
 from app.models.account import FieldMapping

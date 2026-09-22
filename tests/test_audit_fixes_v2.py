@@ -5,9 +5,9 @@ import uuid
 
 import httpx
 
-from app.models.account import Account, AccountStatus, Pipeline, FieldMapping
-from app.models.lead import Lead, ConversationMessage
-from app.services.amocrm_client import AmoCRMClient, amocrm_client
+from app.models.account import Account, AccountStatus, FieldMapping
+from app.models.lead import Lead
+from app.services.amocrm_client import AmoCRMClient
 from app.services.debounce_service import DebounceService
 from app.services.delivery_service import DeliveryService
 from app.services.gemini_client import gemini_http_client
@@ -196,7 +196,7 @@ class TestAuditFixesV2(unittest.IsolatedAsyncioTestCase):
 
         with patch("app.services.delivery_service.extractor.extract_lead_fields", return_value=mock_ext_result), \
              patch("app.services.delivery_service.communicator.generate_reply") as mock_gen, \
-             patch("app.services.delivery_service.amocrm_client.get_lead", return_value={}) as mock_get_lead, \
+             patch("app.services.delivery_service.amocrm_client.get_lead", return_value={}), \
              patch("app.services.delivery_service.amocrm_client.patch_lead_custom_fields", return_value=True), \
              patch("app.services.delivery_service.amocrm_client.run_salesbot", return_value=True):
 

@@ -1,12 +1,10 @@
-import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 import uuid
 
 from app.core.config import settings
 from app.models.account import Account, FieldMapping, AccountStatus
-from app.models.lead import ConversationMessage
-from app.services.amocrm_client import AmoCRMClient, amocrm_client
+from app.services.amocrm_client import AmoCRMClient
 from app.services.debounce_service import DebounceService
 from app.services.llm_extractor import LLMExtractor
 
@@ -17,7 +15,7 @@ class TestAuditFixes(unittest.IsolatedAsyncioTestCase):
         Тест C-2: Проверка, что при передаче current_lead_values экстрактор НЕ перезаписывает
         поля с overwrite_if_filled=False, если значение в amoCRM уже заполнено.
         """
-        extractor = LLMExtractor()
+        extractor = LLMExtractor(api_key="test_key")
         fm1 = FieldMapping(
             amo_field_id=101,
             field_name="Бюджет",
@@ -53,8 +51,11 @@ class TestAuditFixes(unittest.IsolatedAsyncioTestCase):
             ]
         }
 
-        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
-            mock_post.return_value = mock_resp
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_resp
+
+        with patch("app.services.llm_extractor.gemini_http_client.get_client", new_callable=AsyncMock) as mock_get_client:
+            mock_get_client.return_value = mock_client
 
             res = await extractor.extract_lead_fields(
                 field_mappings=[fm1, fm2],

@@ -1,6 +1,5 @@
 import unittest
 from unittest.mock import AsyncMock, patch, MagicMock
-import httpx
 from app.services.amocrm_client import amocrm_client, AmoCRMAuthOrBillingError
 from app.models.account import Account, AccountStatus, Pipeline
 from app.services.delivery_service import DeliveryService

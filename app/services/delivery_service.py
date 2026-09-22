@@ -3,7 +3,7 @@ import base64
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
+from typing import List, Dict, Any
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 

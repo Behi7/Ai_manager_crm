@@ -2,7 +2,6 @@ import logging
 import re
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
-import httpx
 from app.core.config import settings
 from app.services.gemini_client import gemini_http_client
 
