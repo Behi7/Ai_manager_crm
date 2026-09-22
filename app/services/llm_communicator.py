@@ -4,6 +4,7 @@ from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
 import httpx
 from app.core.config import settings
+from app.services.gemini_client import gemini_http_client
 
 logger = logging.getLogger("LLMCommunicator")
 
@@ -204,47 +205,47 @@ class LLMCommunicator:
         params = {"key": self.api_key}
 
         try:
-            async with httpx.AsyncClient(timeout=20.0) as client:
-                resp = await client.post(url, params=params, json=body)
-                if resp.status_code != 200:
-                    logger.error(f"Gemini error {resp.status_code}: {resp.text}")
-                    return CommunicatorResponse(
-                        text="Спасибо за сообщение! Минуту, проверяю информацию.",
-                        is_handover_requested=is_handover,
-                        error=f"Gemini API returned {resp.status_code}: {resp.text[:100]}"
-                    )
-
-                data = resp.json()
-                candidates = data.get("candidates", [])
-                if not candidates:
-                    return CommunicatorResponse(
-                        text="Спасибо! Минуту, я уточняю информацию.",
-                        is_handover_requested=is_handover
-                    )
-
-                parts = candidates[0].get("content", {}).get("parts", [])
-                text_parts = [p.get("text", "") for p in parts if "text" in p]
-                raw_text = "".join(text_parts).strip()
-
-                # Извлечение краткой транскрипции/сути медиа
-                media_summary = None
-                media_match = re.search(r"\[МЕДИА:\s*([^\]]+)\]", raw_text, flags=re.IGNORECASE)
-                if media_match:
-                    media_summary = f"[Медиа: {media_match.group(1).strip()}]"
-                    raw_text = re.sub(r"\[МЕДИА:\s*[^\]]+\]", "", raw_text, flags=re.IGNORECASE).strip()
-
-                # Проверка явного маркера перевода на человека из медиа
-                if "[[HANDOVER]]" in raw_text or "[[handover]]" in raw_text:
-                    is_handover = True
-                    raw_text = raw_text.replace("[[HANDOVER]]", "").replace("[[handover]]", "").strip()
-
-                cleaned_text = self._clean_response(raw_text)
-
+            client = await gemini_http_client.get_client()
+            resp = await client.post(url, params=params, json=body)
+            if resp.status_code != 200:
+                logger.error(f"Gemini error {resp.status_code}: {resp.text}")
                 return CommunicatorResponse(
-                    text=cleaned_text,
+                    text="Спасибо за сообщение! Минуту, проверяю информацию.",
                     is_handover_requested=is_handover,
-                    media_summary=media_summary
+                    error=f"Gemini API returned {resp.status_code}: {resp.text[:100]}"
                 )
+
+            data = resp.json()
+            candidates = data.get("candidates", [])
+            if not candidates:
+                return CommunicatorResponse(
+                    text="Спасибо! Минуту, я уточняю информацию.",
+                    is_handover_requested=is_handover
+                )
+
+            parts = candidates[0].get("content", {}).get("parts", [])
+            text_parts = [p.get("text", "") for p in parts if "text" in p]
+            raw_text = "".join(text_parts).strip()
+
+            # Извлечение краткой транскрипции/сути медиа
+            media_summary = None
+            media_match = re.search(r"\[МЕДИА:\s*([^\]]+)\]", raw_text, flags=re.IGNORECASE)
+            if media_match:
+                media_summary = f"[Медиа: {media_match.group(1).strip()}]"
+                raw_text = re.sub(r"\[МЕДИА:\s*[^\]]+\]", "", raw_text, flags=re.IGNORECASE).strip()
+
+            # Проверка явного маркера перевода на человека из медиа
+            if "[[HANDOVER]]" in raw_text or "[[handover]]" in raw_text:
+                is_handover = True
+                raw_text = raw_text.replace("[[HANDOVER]]", "").replace("[[handover]]", "").strip()
+
+            cleaned_text = self._clean_response(raw_text)
+
+            return CommunicatorResponse(
+                text=cleaned_text,
+                is_handover_requested=is_handover,
+                media_summary=media_summary
+            )
 
         except Exception as e:
             logger.exception(f"Исключение при генерации ответа LLM: {e}")

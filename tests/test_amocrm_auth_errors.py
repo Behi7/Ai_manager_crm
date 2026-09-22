@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import AsyncMock, patch, MagicMock
 import httpx
 from app.services.amocrm_client import amocrm_client, AmoCRMAuthOrBillingError
-from app.models.account import Account, AccountStatus
+from app.models.account import Account, AccountStatus, Pipeline
 from app.services.delivery_service import DeliveryService
 
 
@@ -113,7 +113,10 @@ class TestDeliveryServiceAuthHandling(unittest.IsolatedAsyncioTestCase):
         mock_account.encrypted_token = "encrypted"
         mock_account.ai_reply_field_id = 999
         mock_account.bot_id = 888
-        mock_account.pipelines = []
+        mock_pipeline = MagicMock(spec=Pipeline)
+        mock_pipeline.amo_pipeline_id = 1
+        mock_pipeline.is_enabled = True
+        mock_account.pipelines = [mock_pipeline]
         mock_account.field_mappings = []
 
         mock_session = AsyncMock()

@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 import httpx
 from app.core.config import settings
+from app.services.gemini_client import gemini_http_client
 from app.models.account import FieldMapping
 
 logger = logging.getLogger("LLMExtractor")
@@ -123,57 +124,57 @@ class LLMExtractor:
         params = {"key": self.api_key}
 
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post(url, params=params, json=body)
-                if resp.status_code != 200:
-                    logger.error(f"Gemini extractor error {resp.status_code}: {resp.text}")
-                    return ExtractionResult(
-                        raw_response={},
-                        fields_to_update=[],
-                        field_name_values={},
-                        error=f"Gemini error {resp.status_code}: {resp.text[:100]}"
-                    )
+            client = await gemini_http_client.get_client()
+            resp = await client.post(url, params=params, json=body)
+            if resp.status_code != 200:
+                logger.error(f"Gemini extractor error {resp.status_code}: {resp.text}")
+                return ExtractionResult(
+                    raw_response={},
+                    fields_to_update=[],
+                    field_name_values={},
+                    error=f"Gemini error {resp.status_code}: {resp.text[:100]}"
+                )
 
-                data = resp.json()
-                candidates = data.get("candidates", [])
-                if not candidates:
-                    return ExtractionResult(raw_response={}, fields_to_update=[], field_name_values={})
+            data = resp.json()
+            candidates = data.get("candidates", [])
+            if not candidates:
+                return ExtractionResult(raw_response={}, fields_to_update=[], field_name_values={})
 
-                raw_json_str = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
-                try:
-                    parsed = json.loads(raw_json_str)
-                except Exception as e:
-                    logger.error(f"Не удалось распарсить JSON экстрактора: {raw_json_str} ({e})")
-                    return ExtractionResult(raw_response={"raw": raw_json_str}, fields_to_update=[], field_name_values={}, error=str(e))
+            raw_json_str = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
+            try:
+                parsed = json.loads(raw_json_str)
+            except Exception as e:
+                logger.error(f"Не удалось распарсить JSON экстрактора: {raw_json_str} ({e})")
+                return ExtractionResult(raw_response={"raw": raw_json_str}, fields_to_update=[], field_name_values={}, error=str(e))
 
-                # Фильтруем и сопоставляем с AmoCRM
-                fields_to_update = []
-                field_name_values = {}
+            # Фильтруем и сопоставляем с AmoCRM
+            fields_to_update = []
+            field_name_values = {}
 
-                for fm in enabled_fields:
-                    prop_key = f"field_{fm.amo_field_id}"
-                    val = parsed.get(prop_key)
-                    if val is None or val == "" or val == "null":
+            for fm in enabled_fields:
+                prop_key = f"field_{fm.amo_field_id}"
+                val = parsed.get(prop_key)
+                if val is None or val == "" or val == "null":
+                    continue
+
+                # Проверяем, заполнено ли уже поле и разрешена ли перезапись
+                if not fm.overwrite_if_filled:
+                    existing = current_values.get(fm.amo_field_id)
+                    if existing is not None and existing != "":
+                        # Пропускаем, так как перезапись отключена
                         continue
 
-                    # Проверяем, заполнено ли уже поле и разрешена ли перезапись
-                    if not fm.overwrite_if_filled:
-                        existing = current_values.get(fm.amo_field_id)
-                        if existing is not None and existing != "":
-                            # Пропускаем, так как перезапись отключена
-                            continue
+                fields_to_update.append({
+                    "field_id": fm.amo_field_id,
+                    "values": [{"value": val}]
+                })
+                field_name_values[fm.field_name] = val
 
-                    fields_to_update.append({
-                        "field_id": fm.amo_field_id,
-                        "values": [{"value": val}]
-                    })
-                    field_name_values[fm.field_name] = val
-
-                return ExtractionResult(
-                    raw_response=parsed,
-                    fields_to_update=fields_to_update,
-                    field_name_values=field_name_values
-                )
+            return ExtractionResult(
+                raw_response=parsed,
+                fields_to_update=fields_to_update,
+                field_name_values=field_name_values
+            )
 
         except Exception as e:
             logger.exception(f"Исключение при экстракции полей: {e}")

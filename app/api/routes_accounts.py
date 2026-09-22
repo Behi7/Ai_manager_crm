@@ -1,9 +1,11 @@
+import asyncio
 import logging
 import uuid
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Depends, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
@@ -68,7 +70,26 @@ async def create_or_connect_account(payload: CreateAccountRequest):
     3. Попытка автоматической регистрации глобального вебхука
     4. Сохранение аккаунта и вывод инструкций для Salesbot
     """
-    subdomain = payload.subdomain.strip().lower().replace("https://", "").replace(".amocrm.ru", "")
+    raw_sub = payload.subdomain.strip().lower()
+    if raw_sub.startswith("https://"):
+        raw_sub = raw_sub[8:]
+    elif raw_sub.startswith("http://"):
+        raw_sub = raw_sub[7:]
+    raw_sub = raw_sub.rstrip("/")
+    if "." in raw_sub:
+        allowed_domains = (".amocrm.ru", ".amocrm.com", ".kommo.com")
+        if not any(raw_sub.endswith(d) for d in allowed_domains):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Поддерживаются только официальные домены amoCRM (.amocrm.ru, .amocrm.com) и Kommo (.kommo.com)"
+            )
+        if raw_sub.endswith(".amocrm.ru"):
+            subdomain = raw_sub[:-10]
+        else:
+            subdomain = raw_sub
+    else:
+        subdomain = raw_sub
+
     token = payload.token.strip()
 
     # 1. Валидация токена
@@ -80,7 +101,7 @@ async def create_or_connect_account(payload: CreateAccountRequest):
         )
 
     amo_account_id = token_check.get("account_id")
-    account_name = payload.name or token_check.get("account_name") or subdomain
+    account_name = payload.name or token_check.get("account_name") or token_check.get("name") or subdomain
 
     # 2. Создание/проверка поля 'AI: Ответ ассистента'
     field_id = await amocrm_client.ensure_reply_field(subdomain, token)
@@ -90,84 +111,103 @@ async def create_or_connect_account(payload: CreateAccountRequest):
             detail="Не удалось создать или получить скрытое поле сделки 'AI: Ответ ассистента' в amoCRM"
         )
 
-    # 3. Сохраняем в БД
+    # 3. Сохраняем в БД в короткой сессии (IMPORTANT-11, IMPORTANT-12)
+    encrypted_token = encrypt_token(token)
+    account_id = None
+    account_status_val = None
+    auto_registered = False
+
     async with AsyncSessionLocal() as session:
-        acc_stmt = select(Account).where(Account.subdomain == subdomain)
-        account = (await session.execute(acc_stmt)).scalar_one_or_none()
-
-        encrypted_token = encrypt_token(token)
-
-        if not account:
-            account = Account(
-                subdomain=subdomain,
-                name=account_name,
-                amo_account_id=amo_account_id,
-                encrypted_token=encrypted_token,
-                ai_reply_field_id=field_id,
-                status=AccountStatus.FIELD_CREATED
-            )
-            session.add(account)
-            await session.flush()
-        else:
-            account.name = account_name
-            account.amo_account_id = amo_account_id
-            account.encrypted_token = encrypted_token
-            account.ai_reply_field_id = field_id
-            account.last_error = None
-            account.is_active = True
-
-        account_uuid_str = str(account.id)
-        webhook_dest_url = f"{settings.BASE_URL}/webhook/{account_uuid_str}"
-
-        # 4. Попытка автоматической регистрации системного вебхука
-        wh_id = await amocrm_client.try_register_webhook(subdomain, token, webhook_dest_url)
-        if wh_id:
-            account.webhook_id = wh_id
-            account.webhook_auto_registered = True
-        else:
-            account.webhook_auto_registered = False
-
-        if account.webhook_verified:
-            account.status = AccountStatus.VERIFIED
-        elif account.bot_id:
-            account.status = AccountStatus.BOT_LINKED
-        else:
-            account.status = AccountStatus.AWAITING_MANUAL_BOT
-
-        # Очищаем флаг отключения в Redis
         try:
-            r = await debounce_service.get_redis()
-            await r.delete(f"acc_disabled:{account.id}")
-        except Exception:
-            pass
+            acc_stmt = select(Account).where(Account.subdomain == subdomain)
+            account = (await session.execute(acc_stmt)).scalar_one_or_none()
 
-        # Создаем AIConfig по умолчанию, если нет
-        cfg_stmt = select(AIConfig).where(AIConfig.account_id == account.id)
-        ai_cfg = (await session.execute(cfg_stmt)).scalar_one_or_none()
-        if not ai_cfg:
-            ai_cfg = AIConfig(account_id=account.id)
-            session.add(ai_cfg)
+            if not account:
+                account = Account(
+                    subdomain=subdomain,
+                    name=account_name,
+                    amo_account_id=amo_account_id,
+                    encrypted_token=encrypted_token,
+                    ai_reply_field_id=field_id,
+                    status=AccountStatus.FIELD_CREATED
+                )
+                session.add(account)
+                await session.flush()
+            else:
+                account.name = account_name
+                account.amo_account_id = amo_account_id
+                account.encrypted_token = encrypted_token
+                account.ai_reply_field_id = field_id
+                account.last_error = None
+                account.is_active = True
 
-        await session.commit()
+            # Создаем AIConfig по умолчанию, если нет
+            cfg_stmt = select(AIConfig).where(AIConfig.account_id == account.id)
+            ai_cfg = (await session.execute(cfg_stmt)).scalar_one_or_none()
+            if not ai_cfg:
+                ai_cfg = AIConfig(account_id=account.id)
+                session.add(ai_cfg)
 
-        salesbot_tag = f"{{{{lead.cf.{field_id}}}}}"
+            await session.commit()
+            account_id = account.id
+            account_status_val = account.status.value
+        except IntegrityError:
+            await session.rollback()
+            # Гонка создания аккаунта с одинаковым subdomain
+            acc_stmt = select(Account).where(Account.subdomain == subdomain)
+            account = (await session.execute(acc_stmt)).scalar_one_or_none()
+            if not account:
+                raise HTTPException(status_code=409, detail="Конфликт создания аккаунта: повторите попытку.")
+            account_id = account.id
+            account_status_val = account.status.value
 
-        return {
-            "account_id": account_uuid_str,
-            "subdomain": subdomain,
-            "amo_account_id": amo_account_id,
-            "status": account.status.value,
-            "ai_reply_field_id": field_id,
-            "webhook_url": webhook_dest_url,
-            "webhook_auto_registered": account.webhook_auto_registered,
-            "salesbot_tag": salesbot_tag,
-            "instructions": {
-                "step": "Создайте в конструкторе Salesbot сценарий из двух блоков: [Старт] -> [Отправить сообщение: {{lead.cf." + str(field_id) + "}}]",
-                "rule_1": "НЕ добавляйте никаких вебхук-шагов в Salesbot.",
-                "rule_2": "НЕ ставьте триггер автозапуска бота в Воронке. Бот вызывается исключительно через наш бэкенд.",
-                "webhook_manual": f"Если авторегистрация не удалась, добавьте этот URL в Настройки -> Webhooks (событие add_message): {webhook_dest_url}"
-            }
+    account_uuid_str = str(account_id)
+    webhook_dest_url = f"{settings.BASE_URL}/webhook/{account_uuid_str}"
+
+    # 4. Автоматическая регистрация вебхука (внешний HTTP-вызов БЕЗ удержания транзакции БД)
+    wh_id = await amocrm_client.try_register_webhook(subdomain, token, webhook_dest_url)
+    if wh_id:
+        auto_registered = True
+        async with AsyncSessionLocal() as session:
+            acc_stmt = select(Account).where(Account.id == account_id)
+            acc_obj = (await session.execute(acc_stmt)).scalar_one_or_none()
+            if acc_obj:
+                acc_obj.webhook_id = wh_id
+                acc_obj.webhook_auto_registered = True
+                if acc_obj.webhook_verified:
+                    acc_obj.status = AccountStatus.VERIFIED
+                elif acc_obj.bot_id:
+                    acc_obj.status = AccountStatus.BOT_LINKED
+                else:
+                    acc_obj.status = AccountStatus.AWAITING_MANUAL_BOT
+                account_status_val = acc_obj.status.value
+                await session.commit()
+
+    # Очищаем флаг отключения в Redis
+    try:
+        r = await debounce_service.get_redis()
+        await r.delete(f"acc_disabled:{account_id}")
+    except Exception:
+        pass
+
+    salesbot_tag = f"{{{{lead.cf.{field_id}}}}}"
+
+    return {
+        "account_id": account_uuid_str,
+        "subdomain": subdomain,
+        "amo_account_id": amo_account_id,
+        "status": account_status_val,
+        "ai_reply_field_id": field_id,
+        "webhook_url": webhook_dest_url,
+        "webhook_auto_registered": auto_registered,
+        "salesbot_tag": salesbot_tag,
+        "instructions": {
+            "step": "Создайте в конструкторе Salesbot сценарий из двух блоков: [Старт] -> [Отправить сообщение: {{lead.cf." + str(field_id) + "}}]",
+            "rule_1": "НЕ добавляйте никаких вебхук-шагов в Salesbot.",
+            "rule_2": "НЕ ставьте триггер автозапуска бота в Воронке. Бот вызывается исключительно через наш бэкенд.",
+            "webhook_manual": f"Если авторегистрация не удалась, добавьте этот URL в Настройки -> Webhooks (событие add_message): {webhook_dest_url}"
         }
+    }
 
 
 @router.get("")
@@ -405,11 +445,18 @@ async def test_bot_connection(account_id: uuid.UUID, payload: Optional[TestConne
             if not lead_id:
                 enabled_pipes = [p for p in account.pipelines if p.is_enabled]
                 lead_obj = None
-                for ep in enabled_pipes:
-                    lead_obj = await amocrm_client.get_latest_lead(subdomain, token, pipeline_id=ep.amo_pipeline_id)
-                    if lead_obj:
-                        lead_pipeline_name = ep.name
-                        break
+                if enabled_pipes:
+                    # Параллельный опрос включённых воронок вместо последовательного N+1
+                    pipe_tasks = [
+                        amocrm_client.get_latest_lead(subdomain, token, pipeline_id=ep.amo_pipeline_id)
+                        for ep in enabled_pipes
+                    ]
+                    results = await asyncio.gather(*pipe_tasks, return_exceptions=True)
+                    for ep, res in zip(enabled_pipes, results):
+                        if isinstance(res, dict) and res.get("id"):
+                            lead_obj = res
+                            lead_pipeline_name = ep.name
+                            break
 
                 if not lead_obj:
                     lead_obj = await amocrm_client.get_latest_lead(subdomain, token)

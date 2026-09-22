@@ -5,7 +5,7 @@ import uuid
 from typing import Optional, Dict, Any
 from urllib.parse import parse_qs
 
-from fastapi import APIRouter, Request, HTTPException, status
+from fastapi import APIRouter, Request, HTTPException, status, BackgroundTasks
 from sqlalchemy import select
 
 from app.core.database import AsyncSessionLocal
@@ -165,12 +165,41 @@ async def handle_salesbot_legacy_webhook(request: Request):
     return {"status": "ok", "message": "salesbot webhook received"}
 
 
+async def _verify_account_if_needed(account_uuid: uuid.UUID):
+    """Авто-верификация аккаунта при первом входящем сообщении"""
+    try:
+        async with AsyncSessionLocal() as session:
+            acc_stmt = select(Account).where(Account.id == account_uuid)
+            acc = (await session.execute(acc_stmt)).scalar_one_or_none()
+            if acc and not acc.webhook_verified:
+                acc.webhook_verified = True
+                acc.status = AccountStatus.VERIFIED
+                await session.commit()
+                logger.info(f"Аккаунт {account_uuid} успешно верифицирован первым входящим сообщением!")
+    except Exception as err:
+        logger.error(f"Ошибка авто-верификации аккаунта {account_uuid}: {err}")
+
+
 @router.post("/webhook/{account_uuid}")
-async def handle_amocrm_webhook(account_uuid: uuid.UUID, request: Request):
+async def handle_amocrm_webhook(
+    account_uuid: uuid.UUID,
+    request: Request,
+    background_tasks: BackgroundTasks
+):
     """
     Публичный приёмник вебхуков amoCRM (событие add_message).
     Гарантированный быстрый ответ 200 OK (<100мс).
     """
+    # Rate limit: не более 120 запросов в минуту на аккаунт (защита от DoS и спама)
+    r_redis = await debounce_service.get_redis()
+    rl_key = f"rate_limit:webhook:{account_uuid}"
+    req_count = await r_redis.incr(rl_key)
+    if req_count == 1:
+        await r_redis.expire(rl_key, 60)
+    elif req_count > 120:
+        logger.warning(f"Превышен лимит вебхуков для аккаунта {account_uuid} ({req_count}/мин). Запрос отклонён.")
+        return {"status": "ignored", "reason": "rate_limited"}
+
     content_type = request.headers.get("content-type", "")
     body_bytes = await request.body()
 
@@ -202,29 +231,12 @@ async def handle_amocrm_webhook(account_uuid: uuid.UUID, request: Request):
         return {"status": "ignored", "reason": "missing_entity_id"}
 
     # Фильтр 3.5: Проверка, активен ли аккаунт (быстрый Redis-кэш)
-    r_redis = await debounce_service.get_redis()
     if await r_redis.exists(f"acc_disabled:{account_uuid}"):
         logger.info(f"Аккаунт {account_uuid} остановлен (Стоп). Вебхук проигнорирован.")
         return {"status": "ignored", "reason": "account_disabled"}
 
     # Фильтр 4: Авто-верификация аккаунта при первом входящем сообщении
-    # Выполняется асинхронно без блокировки ответа
-    async def _verify_account_if_needed():
-        try:
-            async with AsyncSessionLocal() as session:
-                acc_stmt = select(Account).where(Account.id == account_uuid)
-                acc = (await session.execute(acc_stmt)).scalar_one_or_none()
-                if acc and not acc.webhook_verified:
-                    acc.webhook_verified = True
-                    acc.status = AccountStatus.VERIFIED
-                    await session.commit()
-                    logger.info(f"Аккаунт {account_uuid} успешно верифицирован первым входящим сообщением!")
-        except Exception as err:
-            logger.error(f"Ошибка авто-верификации аккаунта {account_uuid}: {err}")
-
-    # Запускаем проверку верификации в фоне
-    import asyncio
-    asyncio.create_task(_verify_account_if_needed())
+    background_tasks.add_task(_verify_account_if_needed, account_uuid)
 
     # Фильтр 5: Положить сообщение в буфер дебаунса
     await debounce_service.add_message_to_buffer(

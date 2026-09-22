@@ -21,7 +21,6 @@ class Lead(Base):
     )
     amo_lead_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     amo_contact_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
-    is_busy: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     stuck_count: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     handover_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     last_message_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -30,8 +29,8 @@ class Lead(Base):
     )
 
     account: Mapped["Account"] = relationship("Account", back_populates="leads")
-    messages: Mapped[List["ConversationMessage"]] = relationship("ConversationMessage", back_populates="lead", cascade="all, delete-orphan")
-    extraction_logs: Mapped[List["ExtractionLog"]] = relationship("ExtractionLog", back_populates="lead", cascade="all, delete-orphan")
+    messages: Mapped[List["ConversationMessage"]] = relationship("ConversationMessage", back_populates="lead", cascade="all, delete-orphan", lazy="selectin")
+    extraction_logs: Mapped[List["ExtractionLog"]] = relationship("ExtractionLog", back_populates="lead", cascade="all, delete-orphan", lazy="selectin")
 
     __table_args__ = (
         UniqueConstraint("account_id", "amo_lead_id", name="uq_lead_account_amo_id"),
@@ -55,20 +54,5 @@ class ConversationMessage(Base):
 
     __table_args__ = (
         Index("idx_conv_lead_time", "lead_id", "created_at"),
-    )
-
-
-class ProcessedWebhookMessage(Base):
-    __tablename__ = "processed_webhook_messages"
-
-    message_id: Mapped[str] = mapped_column(String(255), primary_key=True)
-    account_id: Mapped[uuid.UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    lead_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("leads.id", ondelete="SET NULL"), nullable=True
-    )
-    processed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )
 

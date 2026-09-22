@@ -12,11 +12,12 @@ from app.core.database import Base
 
 
 class AccountStatus(str, enum.Enum):
+    """Статусы жизненного цикла интеграции аккаунта amoCRM"""
     PENDING_VALIDATION = "pending_validation"
     FIELD_CREATED = "field_created"
     AWAITING_MANUAL_BOT = "awaiting_manual_bot"
     BOT_LINKED = "bot_linked"
-    AWAITING_PIPELINE_SETUP = "awaiting_pipeline_setup"
+    AWAITING_PIPELINE_SETUP = "awaiting_pipeline_setup"  # Ожидание настройки и включения воронок продаж
     CONFIGURED = "configured"
     VERIFIED = "verified"
     ERROR = "error"
@@ -61,10 +62,10 @@ class Account(Base):
     )
 
     # Связи
-    pipelines: Mapped[List["Pipeline"]] = relationship("Pipeline", back_populates="account", cascade="all, delete-orphan")
-    field_mappings: Mapped[List["FieldMapping"]] = relationship("FieldMapping", back_populates="account", cascade="all, delete-orphan")
-    ai_config: Mapped[Optional["AIConfig"]] = relationship("AIConfig", back_populates="account", uselist=False, cascade="all, delete-orphan")
-    leads: Mapped[List["Lead"]] = relationship("Lead", back_populates="account", cascade="all, delete-orphan")
+    pipelines: Mapped[List["Pipeline"]] = relationship("Pipeline", back_populates="account", cascade="all, delete-orphan", lazy="selectin")
+    field_mappings: Mapped[List["FieldMapping"]] = relationship("FieldMapping", back_populates="account", cascade="all, delete-orphan", lazy="selectin")
+    ai_config: Mapped[Optional["AIConfig"]] = relationship("AIConfig", back_populates="account", uselist=False, cascade="all, delete-orphan", lazy="selectin")
+    leads: Mapped[List["Lead"]] = relationship("Lead", back_populates="account", cascade="all, delete-orphan", lazy="selectin")
 
 
 class Pipeline(Base):

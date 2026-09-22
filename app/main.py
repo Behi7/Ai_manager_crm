@@ -7,6 +7,9 @@ from sqlalchemy import text
 from app.core.config import settings
 from app.core.database import engine, AsyncSessionLocal
 from app.services.debounce_service import debounce_service
+from app.services.amocrm_client import amocrm_client
+from app.services.gemini_client import gemini_http_client
+from app.api.routes_admin import router as admin_router
 from app.api.routes_accounts import router as accounts_router
 from app.api.routes_webhook import router as webhook_router
 
@@ -20,29 +23,51 @@ logger = logging.getLogger("Main")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Инициализация AI Manager Backend...")
-    # Проверка подключения к БД
+    # Проверка подключения к БД (Fail-fast, IMPORTANT-07)
     try:
         async with AsyncSessionLocal() as session:
             await session.execute(text("SELECT 1"))
         logger.info("Подключение к PostgreSQL успешно.")
     except Exception as e:
-        logger.error(f"Ошибка подключения к PostgreSQL: {e}")
+        logger.critical(f"Критическая ошибка подключения к PostgreSQL при запуске: {e}")
+        raise RuntimeError(f"Не удалось подключиться к PostgreSQL: {e}") from e
 
-    # Проверка подключения к Redis
+    # Проверка подключения к Redis (Fail-fast, IMPORTANT-10)
     try:
         r = await debounce_service.get_redis()
         pong = await r.ping()
         logger.info(f"Подключение к Redis успешно: {pong}")
     except Exception as e:
-        logger.error(f"Ошибка подключения к Redis: {e}")
+        logger.critical(f"Критическая ошибка подключения к Redis при запуске: {e}")
+        raise RuntimeError(f"Не удалось подключиться к Redis: {e}") from e
 
-    yield
+    try:
+        yield
+    finally:
+        # Гарантированное освобождение ресурсов при любом исходе (IMPORTANT-06)
+        logger.info("Завершение работы AI Manager Backend...")
+        try:
+            await amocrm_client.close()
+        except Exception as e:
+            logger.error(f"Ошибка закрытия AmoCRM HTTP client: {e}")
 
-    logger.info("Завершение работы AI Manager Backend...")
-    if debounce_service.redis:
-        await debounce_service.redis.close()
-    await engine.dispose()
-    logger.info("Ресурсы БД и Redis освобождены.")
+        try:
+            await gemini_http_client.close()
+        except Exception as e:
+            logger.error(f"Ошибка закрытия Gemini HTTP client: {e}")
+
+        try:
+            if debounce_service.redis:
+                await debounce_service.redis.close()
+        except Exception as e:
+            logger.error(f"Ошибка закрытия Redis: {e}")
+
+        try:
+            await engine.dispose()
+        except Exception as e:
+            logger.error(f"Ошибка закрытия DB engine: {e}")
+
+        logger.info("Ресурсы БД, Redis и HTTP-пула освобождены.")
 
 
 app = FastAPI(
@@ -58,13 +83,11 @@ app = FastAPI(
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-from app.api.routes_admin import router as admin_router
 
 # Подключение роутеров
 app.include_router(admin_router)

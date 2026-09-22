@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import uuid
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 import redis.asyncio as aioredis
 from app.core.config import settings
@@ -12,14 +13,18 @@ class DebounceService:
     def __init__(self):
         self.redis: Optional[aioredis.Redis] = None
         self._timers: Dict[str, asyncio.TimerHandle] = {}
-        self._memory_busy: set = set()
+        self._active_lock_tokens: Dict[str, str] = {}
+        self._background_tasks: set[asyncio.Task] = set()
 
     async def get_redis(self) -> aioredis.Redis:
         if self.redis is None:
             self.redis = aioredis.from_url(
                 settings.REDIS_URL,
                 decode_responses=True,
-                encoding="utf-8"
+                encoding="utf-8",
+                max_connections=settings.REDIS_MAX_CONNECTIONS,
+                health_check_interval=settings.REDIS_HEALTH_CHECK_INTERVAL,
+                retry_on_timeout=settings.REDIS_RETRY_ON_TIMEOUT
             )
         return self.redis
 
@@ -88,6 +93,40 @@ class DebounceService:
             "attachments": attachments
         }
 
+    async def restore_buffered_messages(
+        self,
+        account_id: str,
+        lead_id: str,
+        buffered_data: Dict[str, Any]
+    ):
+        """
+        Восстановление сообщений в начало буфера Redis (LPUSH) при сбое в пайплайне обработки (CRITICAL-01).
+        """
+        if not buffered_data:
+            return
+        texts = buffered_data.get("texts", []) if isinstance(buffered_data, dict) else []
+        attachments = buffered_data.get("attachments", []) if isinstance(buffered_data, dict) else []
+        if not texts and not attachments:
+            return
+
+        try:
+            r = await self.get_redis()
+            key = f"debounce_msgs:{account_id}:{lead_id}"
+
+            items_to_push = []
+            for t in texts:
+                items_to_push.append(json.dumps({"text": t, "attachment": None}, ensure_ascii=False))
+            for att in attachments:
+                items_to_push.append(json.dumps({"text": "", "attachment": att}, ensure_ascii=False))
+
+            if items_to_push:
+                # Вставляем в обратном порядке через lpush, чтобы восстановить исходный порядок сообщений
+                await r.lpush(key, *reversed(items_to_push))
+                await r.expire(key, 300)
+                logger.info(f"🔄 Восстановлено {len(items_to_push)} сообщений в буфер {account_id}:{lead_id} после сбоя.")
+        except Exception as e:
+            logger.error(f"Не удалось восстановить буфер сообщений для {account_id}:{lead_id}: {e}")
+
     async def has_buffered_messages(self, account_id: str, lead_id: str) -> bool:
         """Проверка наличия ожидающих сообщений в буфере лида"""
         try:
@@ -99,30 +138,38 @@ class DebounceService:
             logger.warning(f"Ошибка проверки буфера сообщений {account_id}:{lead_id}: {e}")
             return False
 
-    async def acquire_lead_lock(self, account_id: str, lead_id: str, ttl: int = 90) -> bool:
+    async def acquire_lead_lock(self, account_id: str, lead_id: str, ttl: int = 90, token: Optional[str] = None) -> bool:
         """
-        Захват мьютекса LEAD_BUSY на время выполнения генерации и записи.
+        Распределенный захват мьютекса LEAD_BUSY в Redis на время выполнения генерации и записи.
         """
         lock_id = f"{account_id}:{lead_id}"
-        if lock_id in self._memory_busy:
-            return False
-        
+        tok = token or str(uuid.uuid4())
         r = await self.get_redis()
         key = f"lock:lead:{lock_id}"
-        acquired = await r.set(key, "1", nx=True, ex=ttl)
+        acquired = await r.set(key, tok, nx=True, ex=ttl)
         if acquired:
-            self._memory_busy.add(lock_id)
+            self._active_lock_tokens[lock_id] = tok
             return True
         return False
 
-    async def release_lead_lock(self, account_id: str, lead_id: str):
-        """Освобождение мьютекса LEAD_BUSY"""
+    async def release_lead_lock(self, account_id: str, lead_id: str, token: Optional[str] = None):
+        """Безопасное освобождение Redis-лока по токену через Lua-скрипт (не сбивает чужой продлённый лок)"""
         lock_id = f"{account_id}:{lead_id}"
-        self._memory_busy.discard(lock_id)
+        tok = token or self._active_lock_tokens.pop(lock_id, None)
         try:
             r = await self.get_redis()
             key = f"lock:lead:{lock_id}"
-            await r.delete(key)
+            if tok:
+                lua_script = """
+                if redis.call("get", KEYS[1]) == ARGV[1] then
+                    return redis.call("del", KEYS[1])
+                else
+                    return 0
+                end
+                """
+                await r.eval(lua_script, 1, key, tok)
+            else:
+                await r.delete(key)
         except Exception as e:
             logger.warning(f"Ошибка снятия Redis-лока {lock_id}: {e}")
 
@@ -146,7 +193,9 @@ class DebounceService:
 
         def _fire():
             self._timers.pop(key, None)
-            asyncio.create_task(callback(account_id, lead_id))
+            task = asyncio.create_task(callback(account_id, lead_id))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
         timer = loop.call_later(delay, _fire)
         self._timers[key] = timer

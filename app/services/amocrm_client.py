@@ -24,10 +24,8 @@ class AmoCRMRateLimiter:
         self._locks: Dict[str, asyncio.Lock] = {}
 
     async def wait(self, subdomain: str):
-        if subdomain not in self._locks:
-            self._locks[subdomain] = asyncio.Lock()
-        
-        async with self._locks[subdomain]:
+        lock = self._locks.setdefault(subdomain, asyncio.Lock())
+        async with lock:
             now = time.time()
             elapsed = now - self._last_request_time.get(subdomain, 0.0)
             if elapsed < self.min_interval:
@@ -39,6 +37,43 @@ class AmoCRMClient:
     def __init__(self, timeout: float = 10.0):
         self.timeout = timeout
         self.rate_limiter = AmoCRMRateLimiter(min_interval=0.15)
+        self._client: Optional[httpx.AsyncClient] = None
+        self._client_lock = asyncio.Lock()
+
+    ALLOWED_DOMAINS = (".amocrm.ru", ".amocrm.com", ".kommo.com")
+
+    def _base_url(self, subdomain: str) -> str:
+        sub = subdomain.strip().lower()
+        if "." in sub:
+            for domain in self.ALLOWED_DOMAINS:
+                if sub.endswith(domain):
+                    return f"https://{sub}"
+            clean_sub = sub.split(".")[0]
+            logger.warning(
+                f"AmoCRMClient: Неизвестный или неподдерживаемый домен '{sub}'. "
+                f"Разрешены только {self.ALLOWED_DOMAINS}. Используется безопасный fallback: https://{clean_sub}.amocrm.ru"
+            )
+            return f"https://{clean_sub}.amocrm.ru"
+        return f"https://{sub}.amocrm.ru"
+
+    async def get_client(self) -> httpx.AsyncClient:
+        """Получение или создание долгоживущего AsyncClient с пулом соединений (потокобезопасно)"""
+        if self._client is None or self._client.is_closed:
+            async with self._client_lock:
+                if self._client is None or self._client.is_closed:
+                    self._client = httpx.AsyncClient(
+                        timeout=self.timeout,
+                        follow_redirects=True,
+                        limits=httpx.Limits(max_keepalive_connections=20, max_connections=100)
+                    )
+        return self._client
+
+    async def close(self):
+        """Закрытие пула соединений при остановке приложения"""
+        async with self._client_lock:
+            if self._client and not self._client.is_closed:
+                await self._client.aclose()
+                self._client = None
 
     def _headers(self, token: str) -> Dict[str, str]:
         return {
@@ -64,8 +99,9 @@ class AmoCRMClient:
         GET /api/v4/account
         """
         await self.rate_limiter.wait(subdomain)
-        url = f"https://{subdomain}.amocrm.ru/api/v4/account"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        url = f"{self._base_url(subdomain)}/api/v4/account"
+        try:
+            client = await self.get_client()
             resp = await client.get(url, headers=self._headers(token))
             if resp.status_code == 200:
                 data = resp.json()
@@ -73,6 +109,7 @@ class AmoCRMClient:
                     "is_valid": True,
                     "account_id": data.get("id"),
                     "name": data.get("name"),
+                    "account_name": data.get("name"),
                     "subdomain": data.get("subdomain")
                 }
             elif resp.status_code == 401:
@@ -81,15 +118,20 @@ class AmoCRMClient:
                 return {"is_valid": False, "error": f"Подписка amoCRM закончилась или доступ заблокирован (HTTP {resp.status_code})"}
             else:
                 return {"is_valid": False, "error": f"Ошибка amoCRM: HTTP {resp.status_code}"}
+        except (httpx.RequestError, httpx.TimeoutException) as net_err:
+            logger.error(f"Сетевая ошибка при проверке токена amoCRM ({subdomain}): {net_err}")
+            return {"is_valid": False, "error": f"Сетевая ошибка при связи с amoCRM: {net_err}"}
 
     async def ensure_reply_field(self, subdomain: str, token: str, field_name: str = "Ответ ИИ") -> Optional[int]:
         """
         Идемпотентный поиск или создание поля сделки «Ответ ИИ».
         """
         await self.rate_limiter.wait(subdomain)
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        base = self._base_url(subdomain)
+        try:
+            client = await self.get_client()
             # 1. Поиск существующего поля
-            get_url = f"https://{subdomain}.amocrm.ru/api/v4/leads/custom_fields?limit=250"
+            get_url = f"{base}/api/v4/leads/custom_fields?limit=250"
             resp = await client.get(get_url, headers=self._headers(token))
             self._check_http_auth_or_billing(resp, subdomain)
             if resp.status_code == 200:
@@ -101,7 +143,7 @@ class AmoCRMClient:
 
             # 2. Создание поля, если не найдено
             await self.rate_limiter.wait(subdomain)
-            post_url = f"https://{subdomain}.amocrm.ru/api/v4/leads/custom_fields"
+            post_url = f"{base}/api/v4/leads/custom_fields"
             payload = [
                 {
                     "name": field_name,
@@ -118,6 +160,11 @@ class AmoCRMClient:
             else:
                 logger.error(f"Ошибка создания поля в amoCRM ({subdomain}): HTTP {resp_post.status_code} {resp_post.text}")
                 return None
+        except AmoCRMAuthOrBillingError:
+            raise
+        except (httpx.RequestError, httpx.TimeoutException) as net_err:
+            logger.error(f"Сетевая ошибка в ensure_reply_field ({subdomain}): {net_err}")
+            return None
 
     async def try_register_webhook(self, subdomain: str, token: str, destination_url: str) -> Optional[int]:
         """
@@ -125,28 +172,31 @@ class AmoCRMClient:
         POST /api/v4/webhooks
         """
         await self.rate_limiter.wait(subdomain)
-        url = f"https://{subdomain}.amocrm.ru/api/v4/webhooks"
+        url = f"{self._base_url(subdomain)}/api/v4/webhooks"
         payload = {
             "destination": destination_url,
             "settings": ["add_message"]
         }
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            try:
-                resp = await client.post(url, json=payload, headers=self._headers(token))
-                self._check_http_auth_or_billing(resp, subdomain)
-                if resp.status_code in [200, 201]:
-                    data = resp.json()
-                    webhook_id = data.get("id")
-                    logger.info(f"✅ Авто-регистрация вебхука успешна (ID {webhook_id}) для {subdomain}")
-                    return webhook_id
-                else:
-                    logger.warning(f"Авто-регистрация вебхука вернула HTTP {resp.status_code} ({subdomain})")
-                    return None
-            except AmoCRMAuthOrBillingError:
-                raise
-            except Exception as e:
-                logger.warning(f"Ошибка авто-регистрации вебхука ({subdomain}): {e}")
+        try:
+            client = await self.get_client()
+            resp = await client.post(url, json=payload, headers=self._headers(token))
+            self._check_http_auth_or_billing(resp, subdomain)
+            if resp.status_code in [200, 201]:
+                data = resp.json()
+                webhook_id = data.get("id")
+                logger.info(f"✅ Авто-регистрация вебхука успешна (ID {webhook_id}) для {subdomain}")
+                return webhook_id
+            else:
+                logger.warning(f"Авто-регистрация вебхука вернула HTTP {resp.status_code} ({subdomain})")
                 return None
+        except AmoCRMAuthOrBillingError:
+            raise
+        except (httpx.RequestError, httpx.TimeoutException) as net_err:
+            logger.warning(f"Сетевая ошибка авто-регистрации вебхука ({subdomain}): {net_err}")
+            return None
+        except Exception as e:
+            logger.warning(f"Ошибка авто-регистрации вебхука ({subdomain}): {e}")
+            return None
 
     async def list_bots(self, subdomain: str, token: str) -> List[Dict[str, Any]]:
         """
@@ -154,8 +204,9 @@ class AmoCRMClient:
         GET /api/v4/bots
         """
         await self.rate_limiter.wait(subdomain)
-        url = f"https://{subdomain}.amocrm.ru/api/v4/bots?limit=250"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        url = f"{self._base_url(subdomain)}/api/v4/bots?limit=250"
+        try:
+            client = await self.get_client()
             resp = await client.get(url, headers=self._headers(token))
             self._check_http_auth_or_billing(resp, subdomain)
             if resp.status_code == 200:
@@ -170,6 +221,11 @@ class AmoCRMClient:
                     for b in items
                 ]
             return []
+        except AmoCRMAuthOrBillingError:
+            raise
+        except (httpx.RequestError, httpx.TimeoutException) as net_err:
+            logger.error(f"Сетевая ошибка в list_bots ({subdomain}): {net_err}")
+            return []
 
     async def list_pipelines(self, subdomain: str, token: str) -> List[Dict[str, Any]]:
         """
@@ -177,8 +233,9 @@ class AmoCRMClient:
         GET /api/v4/leads/pipelines
         """
         await self.rate_limiter.wait(subdomain)
-        url = f"https://{subdomain}.amocrm.ru/api/v4/leads/pipelines"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        url = f"{self._base_url(subdomain)}/api/v4/leads/pipelines"
+        try:
+            client = await self.get_client()
             resp = await client.get(url, headers=self._headers(token))
             self._check_http_auth_or_billing(resp, subdomain)
             if resp.status_code == 200:
@@ -194,6 +251,11 @@ class AmoCRMClient:
                     })
                 return result
             return []
+        except AmoCRMAuthOrBillingError:
+            raise
+        except (httpx.RequestError, httpx.TimeoutException) as net_err:
+            logger.error(f"Сетевая ошибка в list_pipelines ({subdomain}): {net_err}")
+            return []
 
     async def list_custom_fields(self, subdomain: str, token: str) -> List[Dict[str, Any]]:
         """
@@ -201,8 +263,9 @@ class AmoCRMClient:
         GET /api/v4/leads/custom_fields
         """
         await self.rate_limiter.wait(subdomain)
-        url = f"https://{subdomain}.amocrm.ru/api/v4/leads/custom_fields?limit=250"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        url = f"{self._base_url(subdomain)}/api/v4/leads/custom_fields?limit=250"
+        try:
+            client = await self.get_client()
             resp = await client.get(url, headers=self._headers(token))
             self._check_http_auth_or_billing(resp, subdomain)
             if resp.status_code == 200:
@@ -217,6 +280,11 @@ class AmoCRMClient:
                     for f in fields
                 ]
             return []
+        except AmoCRMAuthOrBillingError:
+            raise
+        except (httpx.RequestError, httpx.TimeoutException) as net_err:
+            logger.error(f"Сетевая ошибка в list_custom_fields ({subdomain}): {net_err}")
+            return []
 
     async def patch_lead_field(
         self,
@@ -229,30 +297,17 @@ class AmoCRMClient:
         access_token: Optional[str] = None
     ) -> bool:
         """
-        Запись текста ответа ИИ в кастомное поле сделки.
+        Запись текста ответа ИИ в кастомное поле сделки (обёртка над patch_lead_custom_fields).
         PATCH /api/v4/leads/{lead_id}
         """
-        t = token or access_token or ""
         val = value if value is not None else text_value
-        await self.rate_limiter.wait(subdomain)
-        url = f"https://{subdomain}.amocrm.ru/api/v4/leads/{lead_id}"
-        payload = {
-            "custom_fields_values": [
-                {
-                    "field_id": int(field_id),
-                    "values": [{"value": val}]
-                }
-            ]
-        }
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            resp = await client.patch(url, json=payload, headers=self._headers(t))
-            self._check_http_auth_or_billing(resp, subdomain)
-            if resp.status_code in [200, 201]:
-                logger.info(f"💾 Записан ответ в поле #{field_id} сделки #{lead_id} ({subdomain})")
-                return True
-            else:
-                logger.error(f"Ошибка записи ответа в сделку #{lead_id} ({subdomain}): HTTP {resp.status_code} {resp.text}")
-                return False
+        return await self.patch_lead_custom_fields(
+            subdomain=subdomain,
+            token=token,
+            access_token=access_token,
+            lead_id=lead_id,
+            fields=[{"field_id": int(field_id), "values": [{"value": val}]}]
+        )
 
     async def patch_lead_custom_fields(
         self,
@@ -283,9 +338,10 @@ class AmoCRMClient:
             return True
 
         await self.rate_limiter.wait(subdomain)
-        url = f"https://{subdomain}.amocrm.ru/api/v4/leads/{lead_id}"
+        url = f"{self._base_url(subdomain)}/api/v4/leads/{lead_id}"
         payload = {"custom_fields_values": custom_fields_values}
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        try:
+            client = await self.get_client()
             resp = await client.patch(url, json=payload, headers=self._headers(t))
             self._check_http_auth_or_billing(resp, subdomain)
             if resp.status_code in [200, 201]:
@@ -294,6 +350,11 @@ class AmoCRMClient:
             else:
                 logger.error(f"Ошибка обновления полей Экстрактором #{lead_id}: HTTP {resp.status_code} {resp.text}")
                 return False
+        except AmoCRMAuthOrBillingError:
+            raise
+        except (httpx.RequestError, httpx.TimeoutException) as net_err:
+            logger.error(f"Сетевая ошибка в patch_lead_custom_fields (#{lead_id}, {subdomain}): {net_err}")
+            return False
 
     async def run_salesbot(
         self,
@@ -310,12 +371,13 @@ class AmoCRMClient:
         """
         t = token or access_token or ""
         await self.rate_limiter.wait(subdomain)
-        url = f"https://{subdomain}.amocrm.ru/api/v4/bots/{bot_id}/run"
+        url = f"{self._base_url(subdomain)}/api/v4/bots/{bot_id}/run"
         payload = {
             "entity_id": int(entity_id),
             "entity_type": entity_type
         }
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        try:
+            client = await self.get_client()
             resp = await client.post(url, json=payload, headers=self._headers(t))
             self._check_http_auth_or_billing(resp, subdomain)
             if resp.status_code == 202:
@@ -324,6 +386,11 @@ class AmoCRMClient:
             else:
                 logger.error(f"Ошибка запуска Salesbot #{bot_id}: HTTP {resp.status_code} {resp.text}")
                 return False
+        except AmoCRMAuthOrBillingError:
+            raise
+        except (httpx.RequestError, httpx.TimeoutException) as net_err:
+            logger.error(f"Сетевая ошибка в run_salesbot (bot={bot_id}, {subdomain}): {net_err}")
+            return False
 
     async def create_operator_task(
         self,
@@ -343,7 +410,7 @@ class AmoCRMClient:
         t = token or access_token or ""
         eid = element_id if element_id is not None else entity_id
         await self.rate_limiter.wait(subdomain)
-        url = f"https://{subdomain}.amocrm.ru/api/v4/tasks"
+        url = f"{self._base_url(subdomain)}/api/v4/tasks"
         task_item: Dict[str, Any] = {
             "text": text,
             "complete_till": int(time.time() + 3600),  # Срок: +1 час
@@ -354,7 +421,8 @@ class AmoCRMClient:
         if responsible_user_id:
             task_item["responsible_user_id"] = int(responsible_user_id)
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        try:
+            client = await self.get_client()
             resp = await client.post(url, json=[task_item], headers=self._headers(t))
             self._check_http_auth_or_billing(resp, subdomain)
             if resp.status_code in [200, 201]:
@@ -363,33 +431,50 @@ class AmoCRMClient:
             else:
                 logger.error(f"Ошибка создания задачи оператору #{eid}: HTTP {resp.status_code} {resp.text}")
                 return False
+        except AmoCRMAuthOrBillingError:
+            raise
+        except (httpx.RequestError, httpx.TimeoutException) as net_err:
+            logger.error(f"Сетевая ошибка в create_operator_task (#{eid}, {subdomain}): {net_err}")
+            return False
 
     async def get_lead(self, subdomain: str, token: str = "", lead_id: int = 0, access_token: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Получение данных сделки (включая pipeline_id)"""
         t = token or access_token or ""
         await self.rate_limiter.wait(subdomain)
-        url = f"https://{subdomain}.amocrm.ru/api/v4/leads/{lead_id}"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        url = f"{self._base_url(subdomain)}/api/v4/leads/{lead_id}"
+        try:
+            client = await self.get_client()
             resp = await client.get(url, headers=self._headers(t))
             self._check_http_auth_or_billing(resp, subdomain)
             if resp.status_code == 200:
                 return resp.json()
+            return None
+        except AmoCRMAuthOrBillingError:
+            raise
+        except (httpx.RequestError, httpx.TimeoutException) as net_err:
+            logger.error(f"Сетевая ошибка в get_lead (lead={lead_id}, {subdomain}): {net_err}")
             return None
 
     async def get_latest_lead(self, subdomain: str, token: str = "", pipeline_id: Optional[int] = None, access_token: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Получение последней созданной сделки (с возможностью фильтра по воронке)"""
         t = token or access_token or ""
         await self.rate_limiter.wait(subdomain)
-        url = f"https://{subdomain}.amocrm.ru/api/v4/leads?limit=1&order[created_at]=desc"
+        url = f"{self._base_url(subdomain)}/api/v4/leads?limit=1&order[created_at]=desc"
         if pipeline_id:
             url += f"&filter[pipeline_id]={pipeline_id}"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        try:
+            client = await self.get_client()
             resp = await client.get(url, headers=self._headers(t))
             self._check_http_auth_or_billing(resp, subdomain)
             if resp.status_code == 200:
                 leads = resp.json().get("_embedded", {}).get("leads", [])
                 if leads:
                     return leads[0]
+            return None
+        except AmoCRMAuthOrBillingError:
+            raise
+        except (httpx.RequestError, httpx.TimeoutException) as net_err:
+            logger.error(f"Сетевая ошибка в get_latest_lead ({subdomain}): {net_err}")
             return None
 
     async def get_latest_lead_id(self, subdomain: str, token: str = "", pipeline_id: Optional[int] = None, access_token: Optional[str] = None) -> Optional[int]:
@@ -499,13 +584,14 @@ class AmoCRMClient:
         # Нормализация относительных ссылок
         target_url = url
         if target_url.startswith("/") and subdomain:
-            target_url = f"https://{subdomain}.amocrm.ru{target_url}"
+            target_url = f"{self._base_url(subdomain)}{target_url}"
 
         parsed = urlparse(target_url)
         is_amocrm_domain = (
             parsed.netloc.endswith("amocrm.ru") or
             "amojo" in parsed.netloc or
-            parsed.netloc.endswith("amocrm.com")
+            parsed.netloc.endswith("amocrm.com") or
+            parsed.netloc.endswith("kommo.com")
         )
 
         headers = {}
@@ -513,40 +599,67 @@ class AmoCRMClient:
             headers["Authorization"] = f"Bearer {token}"
 
         try:
-            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-                resp = await client.get(target_url, headers=headers)
-                
-                # Если с заголовком авторизации на стороннем CDN/S3 получили 400/403, пробуем без него
-                if resp.status_code in (400, 401, 403) and headers:
-                    logger.debug(f"Повторная попытка загрузки {target_url} без заголовка Authorization...")
-                    resp = await client.get(target_url)
+            client = await self.get_client()
 
-                if resp.status_code != 200:
-                    logger.warning(f"Не удалось скачать вложение {target_url}: HTTP {resp.status_code}")
-                    return None
+            async def _stream_download(request_headers: dict) -> Tuple[Optional[bytes], Optional[str], int]:
+                try:
+                    async with client.stream("GET", target_url, headers=request_headers) as response:
+                        if response.status_code != 200:
+                            return None, None, response.status_code
 
-                content = resp.content
-                if len(content) > max_size_bytes:
-                    logger.warning(
-                        f"Размер вложения {target_url} ({len(content) / 1024 / 1024:.2f} МБ) превышает лимит {max_size_bytes / 1024 / 1024:.1f} МБ"
-                    )
-                    return None
+                        content_length_str = response.headers.get("content-length")
+                        if content_length_str:
+                            try:
+                                if int(content_length_str) > max_size_bytes:
+                                    logger.warning(
+                                        f"Размер вложения {target_url} ({int(content_length_str) / 1024 / 1024:.2f} МБ) превышает лимит {max_size_bytes / 1024 / 1024:.1f} МБ"
+                                    )
+                                    return None, None, 413
+                            except ValueError:
+                                pass
 
-                file_name = hint_filename or parsed.path.split("/")[-1] or "attachment"
-                mime_type = self.detect_media_mime_type(
-                    content=content,
-                    content_type_header=resp.headers.get("content-type", ""),
-                    file_name_or_url=file_name or target_url,
-                    hint_type=hint_type
-                )
+                        chunks = []
+                        total_bytes = 0
+                        async for chunk in response.aiter_bytes(chunk_size=65536):
+                            total_bytes += len(chunk)
+                            if total_bytes > max_size_bytes:
+                                logger.warning(
+                                    f"Размер потока вложения {target_url} превысил лимит {max_size_bytes / 1024 / 1024:.1f} МБ во время скачивания"
+                                )
+                                return None, None, 413
+                            chunks.append(chunk)
 
-                logger.info(f"📥 Успешно скачано вложение: {file_name} ({mime_type}, {len(content) / 1024:.1f} КБ)")
-                return {
-                    "data_bytes": content,
-                    "mime_type": mime_type,
-                    "file_name": file_name,
-                    "size": len(content)
-                }
+                        return b"".join(chunks), response.headers.get("content-type", ""), 200
+                except (httpx.RequestError, httpx.TimeoutException) as stream_err:
+                    logger.warning(f"Сетевая ошибка стриминга вложения {target_url}: {stream_err}")
+                    return None, None, 500
+
+            content, content_type, status_code = await _stream_download(headers)
+            # Если с заголовком авторизации на стороннем CDN/S3 получили 400/401/403, пробуем без него
+            if status_code in (400, 401, 403) and headers:
+                logger.debug(f"Повторная попытка загрузки {target_url} без заголовка Authorization...")
+                content, content_type, status_code = await _stream_download({})
+
+            if status_code != 200 or content is None:
+                if status_code != 413:
+                    logger.warning(f"Не удалось скачать вложение {target_url}: HTTP {status_code}")
+                return None
+
+            file_name = hint_filename or parsed.path.split("/")[-1] or "attachment"
+            mime_type = self.detect_media_mime_type(
+                content=content,
+                content_type_header=content_type or "",
+                file_name_or_url=file_name or target_url,
+                hint_type=hint_type
+            )
+
+            logger.info(f"📥 Успешно скачано вложение: {file_name} ({mime_type}, {len(content) / 1024:.1f} КБ)")
+            return {
+                "data_bytes": content,
+                "mime_type": mime_type,
+                "file_name": file_name,
+                "size": len(content)
+            }
         except Exception as e:
             logger.error(f"Ошибка при скачивании вложения {target_url}: {e}")
             return None
