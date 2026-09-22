@@ -544,8 +544,10 @@ async def get_account_pipelines(account_id: uuid.UUID):
 
         # Синхронизация с БД
         existing_map = {p.amo_pipeline_id: p for p in account.pipelines}
+        amo_pipeline_ids = set()
         for ap in amo_pipelines:
             ap_id = ap["id"]
+            amo_pipeline_ids.add(ap_id)
             if ap_id in existing_map:
                 existing_map[ap_id].name = ap["name"]
             else:
@@ -556,6 +558,12 @@ async def get_account_pipelines(account_id: uuid.UUID):
                     is_enabled=False
                 )
                 session.add(new_p)
+
+        # Если воронка удалена в amoCRM, отключаем её
+        for p in account.pipelines:
+            if p.amo_pipeline_id not in amo_pipeline_ids and p.is_enabled:
+                logger.warning(f"Воронка {p.name} (ID: {p.amo_pipeline_id}) удалена в amoCRM. Отключаем.")
+                p.is_enabled = False
 
         await session.commit()
 
@@ -568,7 +576,8 @@ async def get_account_pipelines(account_id: uuid.UUID):
                 "id": str(p.id),
                 "amo_pipeline_id": p.amo_pipeline_id,
                 "name": p.name,
-                "is_enabled": p.is_enabled
+                "is_enabled": p.is_enabled,
+                "is_deleted_in_amo": p.amo_pipeline_id not in amo_pipeline_ids
             }
             for p in all_pipelines
         ]
@@ -625,11 +634,26 @@ async def get_account_fields(account_id: uuid.UUID):
                 pass
             raise HTTPException(status_code=400, detail=auth_err.detail)
 
+        # Полный список существующих ID полей в amoCRM
+        amo_field_ids = {af["id"] for af in amo_fields}
+
+        # Очищаем из FieldMapping любые поля ответа ИИ (они настраиваются в онбординге/Salesbot)
+        reply_ids = {account.ai_reply_field_id} if account.ai_reply_field_id else set()
+        to_remove = [
+            fm for fm in account.field_mappings
+            if fm.amo_field_id in reply_ids or fm.field_name in ("AI: Ответ ассистента", "Ответ ИИ")
+        ]
+        for fm in to_remove:
+            await session.delete(fm)
+            account.field_mappings.remove(fm)
+
         existing_map = {fm.amo_field_id: fm for fm in account.field_mappings}
         for af in amo_fields:
             af_id = af["id"]
-            if af_id == account.ai_reply_field_id:
+            if af_id in reply_ids:
                 continue  # Пропускаем служебное поле ответа ИИ
+            if af.get("name") in ("AI: Ответ ассистента", "Ответ ИИ"):
+                continue
 
             if af_id in existing_map:
                 existing_map[af_id].field_name = af["name"]
@@ -646,9 +670,28 @@ async def get_account_fields(account_id: uuid.UUID):
                 )
                 session.add(new_fm)
 
+        # Автоматически отключаем поля, которые удалили в amoCRM
+        for fm in account.field_mappings:
+            if fm.amo_field_id not in amo_field_ids:
+                if fm.is_enabled:
+                    logger.warning(
+                        f"Поле {fm.field_name} (ID: {fm.amo_field_id}) удалено в amoCRM. "
+                        f"Отключаем маппинг для аккаунта {account.subdomain}."
+                    )
+                    fm.is_enabled = False
+
         await session.commit()
 
-        fm_stmt = select(FieldMapping).where(FieldMapping.account_id == account_id).order_by(FieldMapping.amo_field_id.asc())
+        # Возвращаем только поля Экстрактора (без служебных полей ответа ИИ)
+        fm_stmt = (
+            select(FieldMapping)
+            .where(
+                FieldMapping.account_id == account_id,
+                FieldMapping.amo_field_id != account.ai_reply_field_id,
+                FieldMapping.field_name.notin_(["AI: Ответ ассистента", "Ответ ИИ"])
+            )
+            .order_by(FieldMapping.amo_field_id.asc())
+        )
         all_mappings = (await session.execute(fm_stmt)).scalars().all()
 
         return [
@@ -659,10 +702,27 @@ async def get_account_fields(account_id: uuid.UUID):
                 "field_type": fm.field_type,
                 "is_enabled": fm.is_enabled,
                 "ai_hint": fm.ai_hint,
-                "overwrite_if_filled": fm.overwrite_if_filled
+                "overwrite_if_filled": fm.overwrite_if_filled,
+                "is_deleted_in_amo": fm.amo_field_id not in amo_field_ids
             }
             for fm in all_mappings
         ]
+
+
+@router.delete("/{account_id}/fields/{amo_field_id}")
+async def delete_account_field_mapping(account_id: uuid.UUID, amo_field_id: int):
+    """Удаление маппинга поля из базы данных (для удаленных полей amoCRM)"""
+    async with AsyncSessionLocal() as session:
+        stmt = select(FieldMapping).where(
+            FieldMapping.account_id == account_id,
+            FieldMapping.amo_field_id == amo_field_id
+        )
+        fm = (await session.execute(stmt)).scalar_one_or_none()
+        if not fm:
+            raise HTTPException(status_code=404, detail="Маппинг поля не найден")
+        await session.delete(fm)
+        await session.commit()
+        return {"success": True, "message": f"Поле #{amo_field_id} удалено из списка"}
 
 
 @router.patch("/{account_id}/fields")
@@ -737,3 +797,198 @@ async def update_ai_config(account_id: uuid.UUID, payload: UpdateAIConfigRequest
 
         await session.commit()
         return {"success": True, "message": "Настройки ИИ успешно обновлены"}
+
+
+@router.post("/{account_id}/sync")
+async def sync_account_with_amocrm(account_id: uuid.UUID):
+    """
+    Полная синхронизация данных аккаунта с amoCRM:
+    1. Проверка токена и доступности amoCRM (обновление имени компании и очистка ошибок).
+    2. Проверка и пересоздание скрытого поля 'AI: Ответ ассистента', если оно удалено.
+    3. Синхронизация списка воронок (актуализация названий, добавление новых, авто-отключение удаленных).
+    4. Синхронизация кастомных полей сделок (актуализация типов/названий, авто-отключение удаленных).
+    5. Проверка доступных Salesbot (проверка наличия привязанного бота).
+    """
+    async with AsyncSessionLocal() as session:
+        stmt = (
+            select(Account)
+            .options(
+                selectinload(Account.pipelines),
+                selectinload(Account.field_mappings),
+                selectinload(Account.ai_config)
+            )
+            .where(Account.id == account_id)
+        )
+        account = (await session.execute(stmt)).scalar_one_or_none()
+        if not account:
+            raise HTTPException(status_code=404, detail="Аккаунт не найден")
+
+        token = decrypt_token(account.encrypted_token)
+        subdomain = account.subdomain
+
+        # 1. Валидация токена
+        try:
+            token_check = await amocrm_client.validate_token(subdomain, token)
+        except AmoCRMAuthOrBillingError as auth_err:
+            account.status = AccountStatus.ERROR
+            account.last_error = auth_err.detail
+            account.is_active = False
+            await session.commit()
+            try:
+                r = await debounce_service.get_redis()
+                await r.set(f"acc_disabled:{account.id}", "1")
+            except Exception:
+                pass
+            raise HTTPException(status_code=400, detail=auth_err.detail)
+
+        if not token_check.get("is_valid"):
+            err_msg = token_check.get("error", "Неверный токен amoCRM")
+            account.status = AccountStatus.ERROR
+            account.last_error = err_msg
+            account.is_active = False
+            await session.commit()
+            try:
+                r = await debounce_service.get_redis()
+                await r.set(f"acc_disabled:{account.id}", "1")
+            except Exception:
+                pass
+            raise HTTPException(status_code=400, detail=err_msg)
+
+        # Обновляем название и amo_account_id
+        if token_check.get("account_name"):
+            account.name = token_check["account_name"]
+        if token_check.get("account_id"):
+            account.amo_account_id = token_check["account_id"]
+        account.last_error = None
+
+        # 2. Проверка и пересоздание скрытого поля ответа ИИ
+        reply_field_id = await amocrm_client.ensure_reply_field(subdomain, token)
+        if reply_field_id:
+            account.ai_reply_field_id = reply_field_id
+
+        # 3. Синхронизация воронок
+        try:
+            amo_pipelines = await amocrm_client.list_pipelines(subdomain, token)
+        except Exception as e:
+            logger.warning(f"Ошибка получения воронок при синхронизации {subdomain}: {e}")
+            amo_pipelines = []
+
+        existing_pipelines = {p.amo_pipeline_id: p for p in account.pipelines}
+        amo_pipeline_ids = set()
+        for ap in amo_pipelines:
+            ap_id = ap["id"]
+            amo_pipeline_ids.add(ap_id)
+            if ap_id in existing_pipelines:
+                existing_pipelines[ap_id].name = ap["name"]
+            else:
+                new_p = Pipeline(
+                    account_id=account.id,
+                    amo_pipeline_id=ap_id,
+                    name=ap["name"],
+                    is_enabled=False
+                )
+                session.add(new_p)
+
+        for p in account.pipelines:
+            if p.amo_pipeline_id not in amo_pipeline_ids and p.is_enabled:
+                p.is_enabled = False
+
+        # 4. Синхронизация полей
+        try:
+            amo_fields = await amocrm_client.list_custom_fields(subdomain, token)
+        except Exception as e:
+            logger.warning(f"Ошибка получения полей при синхронизации {subdomain}: {e}")
+            amo_fields = []
+
+        amo_field_ids = {af["id"] for af in amo_fields}
+
+        # Очищаем служебные поля ответа ИИ из FieldMapping
+        reply_ids = {account.ai_reply_field_id} if account.ai_reply_field_id else set()
+        to_remove = [
+            fm for fm in account.field_mappings
+            if fm.amo_field_id in reply_ids or fm.field_name in ("AI: Ответ ассистента", "Ответ ИИ")
+        ]
+        for fm in to_remove:
+            await session.delete(fm)
+            account.field_mappings.remove(fm)
+
+        existing_fields = {fm.amo_field_id: fm for fm in account.field_mappings}
+        for af in amo_fields:
+            af_id = af["id"]
+            if af_id in reply_ids:
+                continue
+            if af.get("name") in ("AI: Ответ ассистента", "Ответ ИИ"):
+                continue
+
+            if af_id in existing_fields:
+                existing_fields[af_id].field_name = af["name"]
+                existing_fields[af_id].field_type = af.get("type", "text")
+            else:
+                new_fm = FieldMapping(
+                    account_id=account.id,
+                    amo_field_id=af_id,
+                    field_name=af["name"],
+                    field_type=af.get("type", "text"),
+                    is_enabled=False,
+                    ai_hint=f"Значение поля {af['name']}",
+                    overwrite_if_filled=False
+                )
+                session.add(new_fm)
+
+        deleted_fields_count = 0
+        for fm in account.field_mappings:
+            if fm.amo_field_id not in amo_field_ids:
+                if fm.is_enabled:
+                    fm.is_enabled = False
+                    deleted_fields_count += 1
+
+        # 5. Проверка ботов
+        bot_still_exists = True
+        try:
+            bots = await amocrm_client.list_bots(subdomain, token)
+            if account.bot_id:
+                bot_ids = {b["id"] for b in bots}
+                if account.bot_id not in bot_ids:
+                    bot_still_exists = False
+                    logger.warning(f"Привязанный бот #{account.bot_id} не найден в amoCRM для {subdomain}")
+        except Exception as e:
+            logger.warning(f"Ошибка получения ботов при синхронизации {subdomain}: {e}")
+            bots = []
+
+        # Восстановление статуса аккаунта, если он был в ошибке
+        if account.status == AccountStatus.ERROR:
+            if account.webhook_verified:
+                account.status = AccountStatus.VERIFIED
+            elif account.bot_id and bot_still_exists:
+                account.status = AccountStatus.BOT_LINKED
+            else:
+                account.status = AccountStatus.AWAITING_MANUAL_BOT
+
+        await session.commit()
+
+        # Очищаем флаг отключения в Redis, если аккаунт активен
+        if account.is_active:
+            try:
+                r = await debounce_service.get_redis()
+                await r.delete(f"acc_disabled:{account.id}")
+            except Exception:
+                pass
+
+        return {
+            "success": True,
+            "message": f"Данные аккаунта «{account.name or account.subdomain}» успешно синхронизированы с amoCRM",
+            "account": {
+                "id": str(account.id),
+                "name": account.name,
+                "subdomain": account.subdomain,
+                "status": account.status.value,
+                "is_active": account.is_active,
+                "ai_reply_field_id": account.ai_reply_field_id,
+                "bot_id": account.bot_id,
+                "bot_exists": bot_still_exists,
+                "pipelines_count": len(amo_pipelines),
+                "custom_fields_count": len(amo_fields),
+                "deleted_fields_disabled": deleted_fields_count
+            }
+        }
+

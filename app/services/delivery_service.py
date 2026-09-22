@@ -406,16 +406,36 @@ class DeliveryService:
         # Строгая последовательность:
         # 1) Запись в поле сделки (основное поле ответа ИИ)
         reply_field_id = account.ai_reply_field_id
-        if not reply_field_id:
-            logger.error(f"У аккаунта {account_id_str} отсутствует ai_reply_field_id! Запись ответа отменена.")
-            return
-        patch_items = [{"field_id": reply_field_id, "values": [{"value": reply_text}]}]
-        patch_ok = await amocrm_client.patch_lead_custom_fields(
-            subdomain=subdomain,
-            access_token=access_token,
-            lead_id=amo_lead_id,
-            fields=patch_items
-        )
+        patch_ok = False
+        if reply_field_id:
+            patch_items = [{"field_id": reply_field_id, "values": [{"value": reply_text}]}]
+            patch_ok = await amocrm_client.patch_lead_custom_fields(
+                subdomain=subdomain,
+                access_token=access_token,
+                lead_id=amo_lead_id,
+                fields=patch_items
+            )
+
+        # Авто-восстановление поля ответа, если оно удалено или отсутствует в amoCRM
+        if not patch_ok:
+            logger.warning(
+                f"Не удалось записать ответ ИИ в поле {reply_field_id} лида {amo_lead_id}. "
+                "Возможно, поле удалили в amoCRM. Пытаемся автоматически восстановить поле 'AI: Ответ ассистента'..."
+            )
+            new_field_id = await amocrm_client.ensure_reply_field(subdomain, access_token)
+            if new_field_id:
+                account.ai_reply_field_id = new_field_id
+                reply_field_id = new_field_id
+                await session.commit()
+                patch_items = [{"field_id": new_field_id, "values": [{"value": reply_text}]}]
+                patch_ok = await amocrm_client.patch_lead_custom_fields(
+                    subdomain=subdomain,
+                    access_token=access_token,
+                    lead_id=amo_lead_id,
+                    fields=patch_items
+                )
+                if patch_ok:
+                    logger.info(f"✅ Поле ответа 'AI: Ответ ассистента' успешно пересоздано (ID: {new_field_id}) и ответ доставлен!")
 
         if not patch_ok:
             logger.error(f"Не удалось записать ответ ИИ в поле {reply_field_id} лида {amo_lead_id}. Создаем задачу оператору.")
@@ -423,7 +443,7 @@ class DeliveryService:
                 subdomain=subdomain,
                 access_token=access_token,
                 element_id=amo_lead_id,
-                text="Ошибка доставки ответа ИИ в поле сделки. Проверьте сделку вручную."
+                text="Ошибка доставки ответа ИИ в поле сделки (поле удалено или недоступно). Проверьте сделку вручную."
             )
             return
 
@@ -467,12 +487,34 @@ class DeliveryService:
 
             if ext_result.fields_to_update:
                 logger.info(f"Экстрактор нашел поля для лида {amo_lead_id}: {ext_result.field_name_values}")
-                await amocrm_client.patch_lead_custom_fields(
+                ext_patch_ok = await amocrm_client.patch_lead_custom_fields(
                     subdomain=subdomain,
                     access_token=access_token,
                     lead_id=amo_lead_id,
                     fields=ext_result.fields_to_update
                 )
+
+                # Если пакетная запись не удалась (например, одно из полей удалено в CRM)
+                if not ext_patch_ok:
+                    logger.warning(
+                        f"Пакетное обновление полей экстрактора #{amo_lead_id} не удалось. "
+                        "Пробуем сохранить поля поштучно, изолируя удалённые..."
+                    )
+                    for item in ext_result.fields_to_update:
+                        fid = item.get("field_id")
+                        single_ok = await amocrm_client.patch_lead_custom_fields(
+                            subdomain=subdomain,
+                            access_token=access_token,
+                            lead_id=amo_lead_id,
+                            fields=[item]
+                        )
+                        if not single_ok:
+                            logger.error(f"Поле #{fid} отклонено amoCRM (вероятно, удалено). Автоматически отключаем маппинг.")
+                            for fm in account.field_mappings:
+                                if fm.amo_field_id == fid:
+                                    fm.is_enabled = False
+                    await session.commit()
+
                 # Логируем экстракцию
                 ext_log = ExtractionLog(
                     lead_id=lead.id,

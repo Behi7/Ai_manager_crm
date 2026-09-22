@@ -305,7 +305,32 @@ ADMIN_HTML = """<!DOCTYPE html>
           </h3>
           <p class="text-xs text-slate-400">Настройка связки Salesbot, фильтра воронок и Экстрактора CRM</p>
         </div>
-        <button @click="openSettingsModal = false" class="text-slate-400 hover:text-white text-lg">&times;</button>
+        <div class="flex items-center gap-2">
+          <!-- Кнопка сохранения полей Экстрактора рядом с кнопкой синхронизации -->
+          <button x-show="activeTab === 'fields'" @click="saveFields()" :disabled="savingFields" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/30 text-xs font-semibold transition flex items-center gap-1.5 disabled:opacity-50" title="Сохранить настройки полей Экстрактора">
+            <i class="fa-solid" :class="savingFields ? 'fa-spinner animate-spin' : 'fa-floppy-disk text-[11px]'"></i>
+            <span x-text="savingFields ? 'Сохранение...' : 'Сохранить поля'"></span>
+          </button>
+
+          <!-- Кнопка сохранения воронок (если открыта вкладка воронок) -->
+          <button x-show="activeTab === 'pipelines'" @click="savePipelines()" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/30 text-xs font-semibold transition flex items-center gap-1.5" title="Сохранить выбранные воронки">
+            <i class="fa-solid fa-floppy-disk text-[11px]"></i>
+            <span>Сохранить воронки</span>
+          </button>
+
+          <!-- Кнопка сохранения настроек ИИ (если открыта вкладка ИИ) -->
+          <button x-show="activeTab === 'ai'" @click="saveAIConfig()" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/30 text-xs font-semibold transition flex items-center gap-1.5" title="Сохранить настройки ИИ">
+            <i class="fa-solid fa-floppy-disk text-[11px]"></i>
+            <span>Сохранить настройки ИИ</span>
+          </button>
+
+          <!-- Кнопка синхронизации с amoCRM -->
+          <button @click="syncAccount()" :disabled="syncing" class="px-3 py-1.5 rounded-lg bg-indigo-600/30 hover:bg-indigo-600 border border-indigo-500/40 text-xs font-medium text-indigo-200 hover:text-white transition flex items-center gap-1.5 disabled:opacity-50" title="Запросить свежие воронки, поля и проверить бота в amoCRM">
+            <i class="fa-solid fa-arrows-rotate text-[11px]" :class="syncing ? 'animate-spin' : ''"></i>
+            <span x-text="syncing ? 'Синхронизация...' : 'Синхронизировать с amoCRM'"></span>
+          </button>
+          <button @click="openSettingsModal = false" class="text-slate-400 hover:text-white text-lg ml-2">&times;</button>
+        </div>
       </div>
 
       <!-- Alert Banner if Account in Error State -->
@@ -368,16 +393,16 @@ ADMIN_HTML = """<!DOCTYPE html>
         <p class="text-xs text-slate-400">Отметьте воронки, в которых ИИ-менеджер должен автоматически отвечать клиентам:</p>
         <div class="space-y-2">
           <template x-for="p in pipelines" :key="p.amo_pipeline_id">
-            <label class="flex items-center space-x-3 p-3 bg-slate-800/60 rounded-xl border border-slate-700 hover:border-slate-600 cursor-pointer">
-              <input type="checkbox" :checked="p.is_enabled" @change="p.is_enabled = $event.target.checked" class="rounded text-indigo-600 focus:ring-indigo-500 w-4 h-4 bg-slate-700">
-              <div class="text-sm text-white font-medium" x-text="p.name"></div>
+            <label class="flex items-center space-x-3 p-3 bg-slate-800/60 rounded-xl border border-slate-700 hover:border-slate-600 cursor-pointer" :class="p.is_deleted_in_amo ? 'opacity-60 border-rose-900/40' : ''">
+              <input type="checkbox" :checked="p.is_enabled" :disabled="p.is_deleted_in_amo" @change="p.is_enabled = $event.target.checked" class="rounded text-indigo-600 focus:ring-indigo-500 w-4 h-4 bg-slate-700 disabled:opacity-40">
+              <div class="text-sm font-medium" :class="p.is_deleted_in_amo ? 'text-slate-400 line-through' : 'text-white'" x-text="p.name"></div>
+              <span x-show="p.is_deleted_in_amo" class="text-[10px] font-semibold px-2 py-0.5 rounded bg-rose-900/60 text-rose-300 border border-rose-700/50">
+                <i class="fa-solid fa-triangle-exclamation mr-0.5"></i> Удалена в amoCRM
+              </span>
               <div class="text-xs text-slate-500 ml-auto" x-text="'ID: ' + p.amo_pipeline_id"></div>
             </label>
           </template>
         </div>
-        <button @click="savePipelines()" class="px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white">
-          Сохранить воронки
-        </button>
       </div>
 
       <!-- Tab 3: Fields Extractor -->
@@ -385,15 +410,23 @@ ADMIN_HTML = """<!DOCTYPE html>
         <p class="text-xs text-slate-400">Выберите поля сделки, которые ИИ-экстрактор будет извлекать из диалога и автоматически сохранять в CRM:</p>
         <div class="space-y-3">
           <template x-for="f in fields" :key="f.amo_field_id">
-            <div class="p-3 bg-slate-800/60 rounded-xl border border-slate-700 space-y-2">
+            <div class="p-3 bg-slate-800/60 rounded-xl border border-slate-700 space-y-2" :class="f.is_deleted_in_amo ? 'opacity-60 border-rose-900/40' : ''">
               <div class="flex items-center justify-between">
-                <label class="flex items-center space-x-2 cursor-pointer">
-                  <input type="checkbox" :checked="f.is_enabled" @change="f.is_enabled = $event.target.checked" class="rounded text-indigo-600 w-4 h-4 bg-slate-700">
-                  <span class="text-sm font-medium text-white" x-text="f.field_name"></span>
-                </label>
+                <div class="flex items-center space-x-2">
+                  <label class="flex items-center space-x-2 cursor-pointer">
+                    <input type="checkbox" :checked="f.is_enabled" :disabled="f.is_deleted_in_amo" @change="f.is_enabled = $event.target.checked" class="rounded text-indigo-600 w-4 h-4 bg-slate-700 disabled:opacity-40">
+                    <span class="text-sm font-medium" :class="f.is_deleted_in_amo ? 'text-slate-400 line-through' : 'text-white'" x-text="f.field_name"></span>
+                  </label>
+                  <span x-show="f.is_deleted_in_amo" class="text-[10px] font-semibold px-2 py-0.5 rounded bg-rose-900/60 text-rose-300 border border-rose-700/50">
+                    <i class="fa-solid fa-triangle-exclamation mr-0.5"></i> Удалено в amoCRM
+                  </span>
+                  <button x-show="f.is_deleted_in_amo" @click="deleteFieldMapping(f)" class="text-[10px] text-rose-400 hover:text-white px-2 py-0.5 rounded bg-rose-950/80 border border-rose-800/80 hover:bg-rose-800 transition flex items-center gap-1" title="Удалить это поле из панели">
+                    <i class="fa-solid fa-trash-can text-[9px]"></i> Удалить
+                  </button>
+                </div>
                 <span class="text-xs text-slate-500" x-text="f.field_type + ' (ID: ' + f.amo_field_id + ')'"></span>
               </div>
-              <div x-show="f.is_enabled" class="grid grid-cols-1 md:grid-cols-2 gap-2 pt-1">
+              <div x-show="f.is_enabled && !f.is_deleted_in_amo" class="grid grid-cols-1 md:grid-cols-2 gap-2 pt-1">
                 <div>
                   <label class="text-[10px] text-slate-400">Подсказка для ИИ (что искать):</label>
                   <input type="text" x-model="f.ai_hint" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-white">
@@ -406,9 +439,6 @@ ADMIN_HTML = """<!DOCTYPE html>
             </div>
           </template>
         </div>
-        <button @click="saveFields()" class="px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white">
-          Сохранить поля Экстрактора
-        </button>
       </div>
 
       <!-- Tab 4: AI Config -->
@@ -477,9 +507,6 @@ ADMIN_HTML = """<!DOCTYPE html>
             <input type="number" min="1" max="10" x-model="aiConfig.handover_after_stuck" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
           </div>
         </div>
-        <button @click="saveAIConfig()" class="px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white">
-          Сохранить настройки ИИ
-        </button>
       </div>
     </div>
   </div>
@@ -489,6 +516,8 @@ ADMIN_HTML = """<!DOCTYPE html>
       return {
         accounts: [],
         loading: false,
+        syncing: false,
+        savingFields: false,
         openAddModal: false,
         openWizardModal: false,
         openSettingsModal: false,
@@ -615,6 +644,34 @@ ADMIN_HTML = """<!DOCTYPE html>
             this.loadAIConfig()
           ]);
         },
+        async syncAccount() {
+          if (!this.selectedAccount) return;
+          this.syncing = true;
+          try {
+            const res = await fetch(`/accounts/${this.selectedAccount.id}/sync`, {
+              method: 'POST'
+            });
+            const data = await res.json();
+            if (res.ok) {
+              this.showToast(data.message || 'Данные синхронизированы с amoCRM!');
+              await Promise.all([
+                this.loadBots(),
+                this.loadPipelines(),
+                this.loadFields(),
+                this.loadAIConfig(),
+                this.fetchAccounts()
+              ]);
+              const updated = this.accounts.find(a => a.id === this.selectedAccount.id);
+              if (updated) this.selectedAccount = updated;
+            } else {
+              throw new Error(data.detail || 'Ошибка синхронизации');
+            }
+          } catch (e) {
+            this.showToast(e.message, 'error');
+          } finally {
+            this.syncing = false;
+          }
+        },
         async loadBots() {
           if (!this.selectedAccount) return;
           try {
@@ -691,6 +748,7 @@ ADMIN_HTML = """<!DOCTYPE html>
           } catch (e) {}
         },
         async saveFields() {
+          this.savingFields = true;
           try {
             const payload = {
               fields: this.fields.map(f => ({
@@ -710,6 +768,24 @@ ADMIN_HTML = """<!DOCTYPE html>
             }
           } catch (e) {
             this.showToast('Ошибка сохранения полей', 'error');
+          } finally {
+            this.savingFields = false;
+          }
+        },
+        async deleteFieldMapping(f) {
+          if (!confirm(`Удалить поле «${f.field_name}» из списка панели?`)) return;
+          try {
+            const res = await fetch(`/accounts/${this.selectedAccount.id}/fields/${f.amo_field_id}`, {
+              method: 'DELETE'
+            });
+            if (res.ok) {
+              this.fields = this.fields.filter(item => item.amo_field_id !== f.amo_field_id);
+              this.showToast(`Поле «${f.field_name}» удалено из списка`);
+            } else {
+              throw new Error();
+            }
+          } catch (e) {
+            this.showToast('Ошибка удаления поля', 'error');
           }
         },
         async loadAIConfig() {
