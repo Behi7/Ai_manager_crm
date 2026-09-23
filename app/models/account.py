@@ -103,6 +103,7 @@ class FieldMapping(Base):
     amo_field_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     field_name: Mapped[str] = mapped_column(Text, nullable=False)
     field_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(20), nullable=False, server_default="lead")  # 'lead' или 'contact'
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     ai_hint: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     overwrite_if_filled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -137,7 +138,9 @@ class AIConfig(Base):
         nullable=False
     )
     communicator_model: Mapped[str] = mapped_column(String(100), default="gemini-3.1-flash-lite", nullable=False)
+    fallback_communicator_model: Mapped[str] = mapped_column(String(100), default="gemini-3.5-flash", nullable=False)
     extractor_model: Mapped[str] = mapped_column(String(100), default="gemini-3.1-flash-lite", nullable=False)
+    fallback_extractor_model: Mapped[str] = mapped_column(String(100), default="gemini-3.5-flash", nullable=False)
     temperature: Mapped[float] = mapped_column(Numeric(3, 2), default=0.4, nullable=False)
     handover_after_stuck: Mapped[int] = mapped_column(Integer, default=4, nullable=False)
     knowledge_base: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

@@ -249,8 +249,30 @@ class DeliveryService:
         has_enabled_mappings = any(fm.is_enabled for fm in account.field_mappings)
 
         lead_amo_data = None
+        contact_id = None
+        contact_amo_data = None
         if enabled_pipeline_ids or has_enabled_mappings:
             lead_amo_data = await amocrm_client.get_lead(subdomain, access_token, amo_lead_id)
+
+            # Получаем связанный контакт для доступа к его полям
+            if lead_amo_data:
+                contact_id = (
+                    lead_amo_data.get("contact_id")
+                    or next(
+                        iter(
+                            (lead_amo_data.get("_embedded") or {}).get("contacts") or []
+                        ),
+                        {}
+                    ).get("id")
+                )
+                if contact_id:
+                    try:
+                        contact_amo_data = await amocrm_client.get_contact(
+                            subdomain, contact_id, access_token=access_token
+                        )
+                        logger.info(f"Загружен контакт #{contact_id} для лида #{amo_lead_id}")
+                    except Exception as e:
+                        logger.warning(f"Не удалось загрузить контакт #{contact_id}: {e}")
 
         if enabled_pipeline_ids and lead_amo_data:
             lead_pipeline_id = lead_amo_data.get("pipeline_id")
@@ -292,6 +314,16 @@ class DeliveryService:
         # Подготовка целевых полей (FieldMapping) и уже заполненных данных сделки
         # -------------------------------------------------------------
         amo_cf_values: Dict[int, str] = {}
+        # Сначала поля контакта (приоритет у полей сделки, они перезапишут)
+        if contact_amo_data:
+            for cf in (contact_amo_data.get("custom_fields_values") or []):
+                fid = cf.get("field_id")
+                vals = cf.get("values", [])
+                if fid and vals:
+                    val_str = str(vals[0].get("value") or "").strip()
+                    if val_str:
+                        amo_cf_values[fid] = val_str
+        # Поля сделки перезаписывают поля контакта при совпадении ID
         if lead_amo_data:
             for cf in (lead_amo_data.get("custom_fields_values") or []):
                 fid = cf.get("field_id")
@@ -321,6 +353,7 @@ class DeliveryService:
         ai_config = account.ai_config
         prompt = ai_config.communicator_prompt if ai_config else "Ты вежливый ИИ-менеджер."
         comm_model = ai_config.communicator_model if ai_config else "gemini-3.1-flash-lite"
+        fallback_comm_model = ai_config.fallback_communicator_model if ai_config and ai_config.fallback_communicator_model else "gemini-2.5-flash"
         temperature = float(ai_config.temperature) if ai_config else 0.4
         handover_limit = ai_config.handover_after_stuck if ai_config else 4
         knowledge_base = ai_config.knowledge_base if ai_config else None
@@ -334,6 +367,7 @@ class DeliveryService:
             system_prompt=prompt,
             messages=history_payload,
             model_name=comm_model,
+            fallback_model=fallback_comm_model,
             temperature=temperature,
             media_parts=media_parts,
             target_fields=target_fields,
@@ -477,43 +511,89 @@ class DeliveryService:
         if enabled_mappings:
             full_dialog = history_payload + [{"role": "assistant", "content": reply_text}]
             ext_model = ai_config.extractor_model if ai_config else "gemini-3.1-flash-lite"
+            fallback_ext_model = ai_config.fallback_extractor_model if ai_config and ai_config.fallback_extractor_model else "gemini-2.5-flash"
             ext_result = await extractor.extract_lead_fields(
                 field_mappings=account.field_mappings,
                 messages=full_dialog,
                 current_lead_values=amo_cf_values,
                 model_name=ext_model,
+                fallback_model=fallback_ext_model,
                 media_parts=media_parts
             )
 
             if ext_result.fields_to_update:
                 logger.info(f"Экстрактор нашел поля для лида {amo_lead_id}: {ext_result.field_name_values}")
-                ext_patch_ok = await amocrm_client.patch_lead_custom_fields(
-                    subdomain=subdomain,
-                    access_token=access_token,
-                    lead_id=amo_lead_id,
-                    fields=ext_result.fields_to_update
-                )
 
-                # Если пакетная запись не удалась (например, одно из полей удалено в CRM)
-                if not ext_patch_ok:
-                    logger.warning(
-                        f"Пакетное обновление полей экстрактора #{amo_lead_id} не удалось. "
-                        "Пробуем сохранить поля поштучно, изолируя удалённые..."
+                # Разделяем поля по типу сущности: сделка vs контакт
+                fm_entity_map = {fm.amo_field_id: getattr(fm, "entity_type", "lead") for fm in account.field_mappings}
+                lead_fields_to_update = []
+                contact_fields_to_update = []
+                for item in ext_result.fields_to_update:
+                    fid = item.get("field_id")
+                    if fm_entity_map.get(fid, "lead") == "contact":
+                        contact_fields_to_update.append(item)
+                    else:
+                        lead_fields_to_update.append(item)
+
+                # Записываем поля сделки
+                if lead_fields_to_update:
+                    ext_patch_ok = await amocrm_client.patch_lead_custom_fields(
+                        subdomain=subdomain,
+                        access_token=access_token,
+                        lead_id=amo_lead_id,
+                        fields=lead_fields_to_update
                     )
-                    for item in ext_result.fields_to_update:
-                        fid = item.get("field_id")
-                        single_ok = await amocrm_client.patch_lead_custom_fields(
+                    if not ext_patch_ok:
+                        logger.warning(
+                            f"Пакетное обновление полей сделки #{amo_lead_id} не удалось. "
+                            "Пробуем сохранить поля поштучно, изолируя удалённые..."
+                        )
+                        for item in lead_fields_to_update:
+                            fid = item.get("field_id")
+                            single_ok = await amocrm_client.patch_lead_custom_fields(
+                                subdomain=subdomain,
+                                access_token=access_token,
+                                lead_id=amo_lead_id,
+                                fields=[item]
+                            )
+                            if not single_ok:
+                                logger.error(f"Поле #{fid} отклонено amoCRM (вероятно, удалено). Автоматически отключаем маппинг.")
+                                for fm in account.field_mappings:
+                                    if fm.amo_field_id == fid:
+                                        fm.is_enabled = False
+                        await session.commit()
+
+                # Записываем поля контакта
+                target_contact_id = contact_id or (contact_amo_data.get("id") if contact_amo_data else None)
+                if contact_fields_to_update:
+                    if target_contact_id:
+                        contact_patch_ok = await amocrm_client.patch_contact_custom_fields(
                             subdomain=subdomain,
                             access_token=access_token,
-                            lead_id=amo_lead_id,
-                            fields=[item]
+                            contact_id=target_contact_id,
+                            fields=contact_fields_to_update
                         )
-                        if not single_ok:
-                            logger.error(f"Поле #{fid} отклонено amoCRM (вероятно, удалено). Автоматически отключаем маппинг.")
-                            for fm in account.field_mappings:
-                                if fm.amo_field_id == fid:
-                                    fm.is_enabled = False
-                    await session.commit()
+                        if not contact_patch_ok:
+                            logger.warning(
+                                f"Пакетное обновление полей контакта #{target_contact_id} не удалось. "
+                                "Пробуем поштучно..."
+                            )
+                            for item in contact_fields_to_update:
+                                fid = item.get("field_id")
+                                single_ok = await amocrm_client.patch_contact_custom_fields(
+                                    subdomain=subdomain,
+                                    access_token=access_token,
+                                    contact_id=target_contact_id,
+                                    fields=[item]
+                                )
+                                if not single_ok:
+                                    logger.error(f"Поле контакта #{fid} отклонено amoCRM. Отключаем маппинг.")
+                                    for fm in account.field_mappings:
+                                        if fm.amo_field_id == fid:
+                                            fm.is_enabled = False
+                            await session.commit()
+                    else:
+                        logger.warning(f"Нет contact_id для записи полей контакта в лиде #{amo_lead_id}.")
 
                 # Логируем экстракцию
                 ext_log = ExtractionLog(

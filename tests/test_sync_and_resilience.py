@@ -211,11 +211,12 @@ class TestSyncAndResilience(unittest.IsolatedAsyncioTestCase):
         mock_session.commit = AsyncMock()
 
         # amoCRM возвращает только поле 100 (поле 200 удалено)
-        amo_fields_resp = [{"id": 100, "name": "Имя", "type": "text"}]
+        amo_fields_resp = [{"id": 100, "name": "Имя", "type": "text", "entity_type": "lead"}]
 
         with patch("app.api.routes_accounts.AsyncSessionLocal", return_value=mock_session), \
              patch("app.api.routes_accounts.decrypt_token", return_value="plain_tok"), \
-             patch("app.api.routes_accounts.amocrm_client.list_custom_fields", return_value=amo_fields_resp):
+             patch("app.api.routes_accounts.amocrm_client.list_custom_fields", return_value=amo_fields_resp), \
+             patch("app.api.routes_accounts.amocrm_client.list_contact_custom_fields", return_value=[]):
 
             mock_session.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session.__aexit__ = AsyncMock(return_value=None)

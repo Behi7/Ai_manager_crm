@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from typing import List, Optional, Dict, Any
@@ -52,6 +53,7 @@ class LLMCommunicator:
         system_prompt: str,
         messages: List[Dict[str, str]],
         model_name: str = "gemini-3.1-flash-lite",
+        fallback_model: Optional[str] = None,
         temperature: float = 0.4,
         lead_context: Optional[Dict[str, Any]] = None,
         media_parts: Optional[List[Dict[str, Any]]] = None,
@@ -212,74 +214,116 @@ class LLMCommunicator:
                     }
                 })
 
-        body: Dict[str, Any] = {
-            "contents": combined_contents,
-            "generationConfig": {
-                "temperature": float(temperature),
-                "maxOutputTokens": 400
+        # Очередь моделей для вызова: сначала основная, затем настраиваемая резервная
+        models_to_try = [model_name]
+        chosen_fallback = (fallback_model or "").strip()
+        if not chosen_fallback:
+            chosen_fallback = "gemini-2.5-flash" if model_name != "gemini-2.5-flash" else "gemini-flash-latest"
+        if chosen_fallback and chosen_fallback not in models_to_try:
+            models_to_try.append(chosen_fallback)
+
+        last_error: Optional[str] = None
+
+        for cur_model in models_to_try:
+            is_fallback = (cur_model != model_name)
+            # При переключении на резервную модель отключаем кэш, так как он привязан к конкретной модели
+            use_cache = has_active_cache and not is_fallback
+
+            req_body: Dict[str, Any] = {
+                "contents": combined_contents,
+                "generationConfig": {
+                    "temperature": float(temperature),
+                    "maxOutputTokens": 400
+                }
             }
-        }
+            if use_cache:
+                req_body["cachedContent"] = gemini_cache_name
+            else:
+                req_body["systemInstruction"] = {
+                    "parts": [{"text": full_system_instruction}]
+                }
 
-        if has_active_cache:
-            body["cachedContent"] = gemini_cache_name
-        else:
-            body["systemInstruction"] = {
-                "parts": [{"text": full_system_instruction}]
-            }
+            url = GEMINI_API_URL.format(model=cur_model)
+            params = {"key": self.api_key}
 
-        url = GEMINI_API_URL.format(model=model_name)
-        params = {"key": self.api_key}
+            # До 2 попыток на каждую модель (повтор при 503/429/5xx/сетевом сбое)
+            for attempt in range(1, 3):
+                try:
+                    client = await gemini_http_client.get_client()
+                    resp = await client.post(url, params=params, json=req_body)
 
-        try:
-            client = await gemini_http_client.get_client()
-            resp = await client.post(url, params=params, json=body)
-            if resp.status_code != 200:
-                logger.error(f"Gemini error {resp.status_code}: {resp.text}")
-                return CommunicatorResponse(
-                    text="Спасибо за сообщение! Минуту, проверяю информацию.",
-                    is_handover_requested=is_handover,
-                    error=f"Gemini API returned {resp.status_code}: {resp.text[:100]}"
-                )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        candidates = data.get("candidates", [])
+                        if not candidates:
+                            logger.warning(f"Gemini {cur_model} вернул 200 без кандидатов: {data}")
+                            break
 
-            data = resp.json()
-            candidates = data.get("candidates", [])
-            if not candidates:
-                return CommunicatorResponse(
-                    text="Спасибо! Минуту, я уточняю информацию.",
-                    is_handover_requested=is_handover
-                )
+                        parts = candidates[0].get("content", {}).get("parts", [])
+                        text_parts = [p.get("text", "") for p in parts if "text" in p]
+                        raw_text = "".join(text_parts).strip()
 
-            parts = candidates[0].get("content", {}).get("parts", [])
-            text_parts = [p.get("text", "") for p in parts if "text" in p]
-            raw_text = "".join(text_parts).strip()
+                        # Извлечение краткой транскрипции/сути медиа
+                        media_summary = None
+                        media_match = re.search(r"\[МЕДИА:\s*([^\]]+)\]", raw_text, flags=re.IGNORECASE)
+                        if media_match:
+                            media_summary = f"[Медиа: {media_match.group(1).strip()}]"
+                            raw_text = re.sub(r"\[МЕДИА:\s*[^\]]+\]", "", raw_text, flags=re.IGNORECASE).strip()
 
-            # Извлечение краткой транскрипции/сути медиа
-            media_summary = None
-            media_match = re.search(r"\[МЕДИА:\s*([^\]]+)\]", raw_text, flags=re.IGNORECASE)
-            if media_match:
-                media_summary = f"[Медиа: {media_match.group(1).strip()}]"
-                raw_text = re.sub(r"\[МЕДИА:\s*[^\]]+\]", "", raw_text, flags=re.IGNORECASE).strip()
+                        # Проверка явного маркера перевода на человека из медиа
+                        if "[[HANDOVER]]" in raw_text or "[[handover]]" in raw_text:
+                            is_handover = True
+                            raw_text = raw_text.replace("[[HANDOVER]]", "").replace("[[handover]]", "").strip()
 
-            # Проверка явного маркера перевода на человека из медиа
-            if "[[HANDOVER]]" in raw_text or "[[handover]]" in raw_text:
-                is_handover = True
-                raw_text = raw_text.replace("[[HANDOVER]]", "").replace("[[handover]]", "").strip()
+                        cleaned_text = self._clean_response(raw_text)
 
-            cleaned_text = self._clean_response(raw_text)
+                        if is_fallback:
+                            logger.info(f"✅ Успешный ответ от резервной модели {cur_model} после сбоя основной {model_name}")
 
-            return CommunicatorResponse(
-                text=cleaned_text,
-                is_handover_requested=is_handover,
-                media_summary=media_summary
-            )
+                        return CommunicatorResponse(
+                            text=cleaned_text,
+                            is_handover_requested=is_handover,
+                            media_summary=media_summary
+                        )
 
-        except Exception as e:
-            logger.exception(f"Исключение при генерации ответа LLM: {e}")
-            return CommunicatorResponse(
-                text="Спасибо за ожидание! Скоро отвечу вам.",
-                is_handover_requested=is_handover,
-                error=str(e)
-            )
+                    # Обработка временных ошибок перегрузки (503, 429, 500, 502, 504)
+                    last_error = f"Gemini {cur_model} HTTP {resp.status_code}: {resp.text[:150]}"
+                    if resp.status_code in (503, 429, 500, 502, 504):
+                        logger.warning(
+                            f"Gemini {cur_model} вернул статус {resp.status_code} (попытка {attempt}/2). "
+                            f"{'Ожидание 1с перед повтором...' if attempt == 1 else 'Переключение на резервную модель...'}"
+                        )
+                        if attempt == 1:
+                            await asyncio.sleep(1.0)
+                            continue
+                        else:
+                            break
+                    else:
+                        logger.error(f"Gemini {cur_model} неустранимая ошибка {resp.status_code}: {resp.text}")
+                        break
+
+                except (httpx.TimeoutException, httpx.NetworkError) as net_err:
+                    last_error = f"Gemini {cur_model} сетевая ошибка/таймаут: {net_err}"
+                    logger.warning(
+                        f"Сетевая ошибка/таймаут при вызове {cur_model} (попытка {attempt}/2): {net_err}"
+                    )
+                    if attempt == 1:
+                        await asyncio.sleep(1.0)
+                        continue
+                    else:
+                        break
+                except Exception as ex:
+                    last_error = f"Исключение при вызове {cur_model}: {ex}"
+                    logger.exception(f"Непредвиденное исключение при вызове {cur_model}: {ex}")
+                    break
+
+        # Если все попытки и резервные модели исчерпаны
+        logger.error(f"Все попытки вызова моделей Gemini ({models_to_try}) завершились сбоем: {last_error}")
+        return CommunicatorResponse(
+            text="Прошу прощения, сейчас возникла задержка связи. Переключаю вас на специалиста, он уже подключается к диалогу.",
+            is_handover_requested=True,
+            error=last_error or "Все модели Gemini недоступны"
+        )
 
     async def create_gemini_context_cache(
         self,

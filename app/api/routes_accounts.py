@@ -54,7 +54,9 @@ class UpdateFieldsRequest(BaseModel):
 class UpdateAIConfigRequest(BaseModel):
     communicator_prompt: Optional[str] = None
     communicator_model: Optional[str] = None
+    fallback_communicator_model: Optional[str] = None
     extractor_model: Optional[str] = None
+    fallback_extractor_model: Optional[str] = None
     temperature: Optional[float] = None
     handover_after_stuck: Optional[int] = None
     knowledge_base: Optional[str] = None
@@ -266,7 +268,9 @@ async def get_account_detail(account_id: uuid.UUID):
             "ai_config": {
                 "communicator_prompt": account.ai_config.communicator_prompt if account.ai_config else None,
                 "communicator_model": account.ai_config.communicator_model if account.ai_config else None,
+                "fallback_communicator_model": account.ai_config.fallback_communicator_model if account.ai_config else "gemini-2.5-flash",
                 "extractor_model": account.ai_config.extractor_model if account.ai_config else None,
+                "fallback_extractor_model": account.ai_config.fallback_extractor_model if account.ai_config else "gemini-2.5-flash",
                 "temperature": float(account.ai_config.temperature) if account.ai_config else 0.4,
                 "handover_after_stuck": account.ai_config.handover_after_stuck if account.ai_config else 4
             } if account.ai_config else None
@@ -612,7 +616,7 @@ async def update_account_pipelines(account_id: uuid.UUID, payload: UpdatePipelin
 
 @router.get("/{account_id}/fields")
 async def get_account_fields(account_id: uuid.UUID):
-    """Синхронизация и получение списка кастомных полей сделок"""
+    """Синхронизация и получение списка кастомных полей сделок и контактов"""
     async with AsyncSessionLocal() as session:
         stmt = select(Account).options(selectinload(Account.field_mappings)).where(Account.id == account_id)
         account = (await session.execute(stmt)).scalar_one_or_none()
@@ -621,7 +625,8 @@ async def get_account_fields(account_id: uuid.UUID):
 
         token = decrypt_token(account.encrypted_token)
         try:
-            amo_fields = await amocrm_client.list_custom_fields(account.subdomain, token)
+            lead_fields = await amocrm_client.list_custom_fields(account.subdomain, token)
+            contact_fields = await amocrm_client.list_contact_custom_fields(account.subdomain, token)
         except AmoCRMAuthOrBillingError as auth_err:
             account.status = AccountStatus.ERROR
             account.last_error = auth_err.detail
@@ -634,7 +639,9 @@ async def get_account_fields(account_id: uuid.UUID):
                 pass
             raise HTTPException(status_code=400, detail=auth_err.detail)
 
-        # Полный список существующих ID полей в amoCRM
+        # Объединяем все поля (сделки + контакты)
+        amo_fields = lead_fields + contact_fields
+        # Полный список существующих ID полей в amoCRM (для обнаружения удалённых)
         amo_field_ids = {af["id"] for af in amo_fields}
 
         # Очищаем из FieldMapping любые поля ответа ИИ (они настраиваются в онбординге/Salesbot)
@@ -655,15 +662,18 @@ async def get_account_fields(account_id: uuid.UUID):
             if af.get("name") in ("AI: Ответ ассистента", "Ответ ИИ"):
                 continue
 
+            entity = af.get("entity_type", "lead")
             if af_id in existing_map:
                 existing_map[af_id].field_name = af["name"]
                 existing_map[af_id].field_type = af.get("type", "text")
+                existing_map[af_id].entity_type = entity
             else:
                 new_fm = FieldMapping(
                     account_id=account.id,
                     amo_field_id=af_id,
                     field_name=af["name"],
                     field_type=af.get("type", "text"),
+                    entity_type=entity,
                     is_enabled=False,
                     ai_hint=f"Значение поля {af['name']}",
                     overwrite_if_filled=False
@@ -682,7 +692,7 @@ async def get_account_fields(account_id: uuid.UUID):
 
         await session.commit()
 
-        # Возвращаем только поля Экстрактора (без служебных полей ответа ИИ)
+        # Возвращаем все поля Экстрактора (без служебных полей ответа ИИ)
         fm_stmt = (
             select(FieldMapping)
             .where(
@@ -690,7 +700,7 @@ async def get_account_fields(account_id: uuid.UUID):
                 FieldMapping.amo_field_id != account.ai_reply_field_id,
                 FieldMapping.field_name.notin_(["AI: Ответ ассистента", "Ответ ИИ"])
             )
-            .order_by(FieldMapping.amo_field_id.asc())
+            .order_by(FieldMapping.entity_type.asc(), FieldMapping.amo_field_id.asc())
         )
         all_mappings = (await session.execute(fm_stmt)).scalars().all()
 
@@ -700,6 +710,7 @@ async def get_account_fields(account_id: uuid.UUID):
                 "amo_field_id": fm.amo_field_id,
                 "field_name": fm.field_name,
                 "field_type": fm.field_type,
+                "entity_type": getattr(fm, "entity_type", "lead"),
                 "is_enabled": fm.is_enabled,
                 "ai_hint": fm.ai_hint,
                 "overwrite_if_filled": fm.overwrite_if_filled,
@@ -758,7 +769,9 @@ async def get_ai_config(account_id: uuid.UUID):
             "account_id": str(cfg.account_id),
             "communicator_prompt": cfg.communicator_prompt,
             "communicator_model": cfg.communicator_model,
+            "fallback_communicator_model": cfg.fallback_communicator_model or "gemini-2.5-flash",
             "extractor_model": cfg.extractor_model,
+            "fallback_extractor_model": cfg.fallback_extractor_model or "gemini-2.5-flash",
             "temperature": float(cfg.temperature),
             "handover_after_stuck": cfg.handover_after_stuck,
             "knowledge_base": cfg.knowledge_base or "",
@@ -781,8 +794,12 @@ async def update_ai_config(account_id: uuid.UUID, payload: UpdateAIConfigRequest
             cfg.communicator_prompt = payload.communicator_prompt
         if payload.communicator_model is not None:
             cfg.communicator_model = payload.communicator_model
+        if payload.fallback_communicator_model is not None:
+            cfg.fallback_communicator_model = payload.fallback_communicator_model.strip()
         if payload.extractor_model is not None:
             cfg.extractor_model = payload.extractor_model
+        if payload.fallback_extractor_model is not None:
+            cfg.fallback_extractor_model = payload.fallback_extractor_model.strip()
         if payload.temperature is not None:
             cfg.temperature = payload.temperature
         if payload.handover_after_stuck is not None:

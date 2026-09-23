@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from typing import List, Dict, Any, Optional
@@ -30,6 +31,7 @@ class LLMExtractor:
         messages: List[Dict[str, str]],
         current_lead_values: Optional[Dict[int, Any]] = None,
         model_name: str = "gemini-3.1-flash-lite",
+        fallback_model: Optional[str] = None,
         media_parts: Optional[List[Dict[str, Any]]] = None,
     ) -> ExtractionResult:
         """
@@ -120,70 +122,118 @@ class LLMExtractor:
             }
         }
 
-        url = GEMINI_API_URL.format(model=model_name)
-        params = {"key": self.api_key}
+        # Очередь моделей для вызова: сначала основная, затем настраиваемая резервная
+        models_to_try = [model_name]
+        chosen_fallback = (fallback_model or "").strip()
+        if not chosen_fallback:
+            chosen_fallback = "gemini-2.5-flash" if model_name != "gemini-2.5-flash" else "gemini-flash-latest"
+        if chosen_fallback and chosen_fallback not in models_to_try:
+            models_to_try.append(chosen_fallback)
 
-        try:
-            client = await gemini_http_client.get_client()
-            resp = await client.post(url, params=params, json=body)
-            if resp.status_code != 200:
-                logger.error(f"Gemini extractor error {resp.status_code}: {resp.text}")
-                return ExtractionResult(
-                    raw_response={},
-                    fields_to_update=[],
-                    field_name_values={},
-                    error=f"Gemini error {resp.status_code}: {resp.text[:100]}"
-                )
+        last_error: Optional[str] = None
+        parsed: Dict[str, Any] = {}
 
-            data = resp.json()
-            candidates = data.get("candidates", [])
-            if not candidates:
-                return ExtractionResult(raw_response={}, fields_to_update=[], field_name_values={})
+        for cur_model in models_to_try:
+            is_fallback = (cur_model != model_name)
+            url = GEMINI_API_URL.format(model=cur_model)
+            params = {"key": self.api_key}
 
-            raw_json_str = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
-            try:
-                parsed = json.loads(raw_json_str)
-            except Exception as e:
-                logger.error(f"Не удалось распарсить JSON экстрактора: {raw_json_str} ({e})")
-                return ExtractionResult(raw_response={"raw": raw_json_str}, fields_to_update=[], field_name_values={}, error=str(e))
+            # До 2 попыток на каждую модель (повтор при 503/429/5xx/сетевом сбое)
+            for attempt in range(1, 3):
+                try:
+                    client = await gemini_http_client.get_client()
+                    resp = await client.post(url, params=params, json=body)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        candidates = data.get("candidates", [])
+                        if not candidates:
+                            logger.warning(f"Экстрактор {cur_model} вернул 200 без кандидатов: {data}")
+                            break
+                        raw_json_str = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
+                        try:
+                            parsed = json.loads(raw_json_str)
+                            if is_fallback:
+                                logger.info(f"✅ Экстрактор успешно сработал на резервной модели {cur_model}!")
+                            last_error = None
+                            break
+                        except Exception as e:
+                            logger.error(f"Не удалось распарсить JSON экстрактора {cur_model}: {raw_json_str} ({e})")
+                            last_error = str(e)
+                            break
 
-            # Фильтруем и сопоставляем с AmoCRM
-            fields_to_update = []
-            field_name_values = {}
+                    last_error = f"Gemini extractor {cur_model} HTTP {resp.status_code}: {resp.text[:100]}"
+                    if resp.status_code in (503, 429, 500, 502, 504):
+                        logger.warning(
+                            f"Gemini extractor {cur_model} вернул статус {resp.status_code} (попытка {attempt}/2). "
+                            f"{'Ожидание 1с перед повтором...' if attempt == 1 else 'Переключение...'}"
+                        )
+                        if attempt == 1:
+                            await asyncio.sleep(1.0)
+                            continue
+                        else:
+                            break
+                    else:
+                        logger.error(f"Gemini extractor {cur_model} неустранимая ошибка {resp.status_code}: {resp.text}")
+                        break
 
-            for fm in enabled_fields:
-                prop_key = f"field_{fm.amo_field_id}"
-                val = parsed.get(prop_key)
-                if val is None or val == "" or val == "null":
-                    continue
-
-                # Проверяем, заполнено ли уже поле и разрешена ли перезапись
-                if not fm.overwrite_if_filled:
-                    existing = current_values.get(fm.amo_field_id)
-                    if existing is not None and existing != "":
-                        # Пропускаем, так как перезапись отключена
+                except (httpx.TimeoutException, httpx.NetworkError) as net_err:
+                    last_error = f"Сетевая ошибка/таймаут экстрактора {cur_model}: {net_err}"
+                    logger.warning(f"Сетевая ошибка экстрактора {cur_model} (попытка {attempt}/2): {net_err}")
+                    if attempt == 1:
+                        await asyncio.sleep(1.0)
                         continue
+                    else:
+                        break
+                except Exception as ex:
+                    last_error = f"Исключение экстрактора {cur_model}: {ex}"
+                    logger.exception(f"Непредвиденное исключение экстрактора {cur_model}: {ex}")
+                    break
 
-                fields_to_update.append({
-                    "field_id": fm.amo_field_id,
-                    "values": [{"value": val}]
-                })
-                field_name_values[fm.field_name] = val
+            if parsed:
+                break
 
-            return ExtractionResult(
-                raw_response=parsed,
-                fields_to_update=fields_to_update,
-                field_name_values=field_name_values
-            )
-
-        except Exception as e:
-            logger.exception(f"Исключение при экстракции полей: {e}")
+        if not parsed:
+            if last_error:
+                logger.error(f"Экстракция полей не удалась на всех моделях ({models_to_try}): {last_error}")
             return ExtractionResult(
                 raw_response={},
                 fields_to_update=[],
                 field_name_values={},
-                error=str(e)
+                error=last_error
             )
+
+        # Фильтруем и сопоставляем с AmoCRM
+        fields_to_update = []
+        field_name_values = {}
+
+        for fm in enabled_fields:
+            prop_key = f"field_{fm.amo_field_id}"
+            val = parsed.get(prop_key)
+            if val is None or val == "" or val == "null":
+                continue
+
+            # Проверяем, заполнено ли уже поле и разрешена ли перезапись
+            if not fm.overwrite_if_filled:
+                existing = current_values.get(fm.amo_field_id)
+                if existing is not None and existing != "":
+                    # Пропускаем, так как перезапись отключена
+                    continue
+
+            val_obj: Dict[str, Any] = {"value": val}
+            if (fm.field_type or "").lower() == "multitext":
+                val_obj["enum_code"] = "WORK"
+
+            fields_to_update.append({
+                "field_id": fm.amo_field_id,
+                "values": [val_obj]
+            })
+            field_name_values[fm.field_name] = val
+
+        return ExtractionResult(
+            raw_response=parsed,
+            fields_to_update=fields_to_update,
+            field_name_values=field_name_values
+        )
 
 
 extractor = LLMExtractor()

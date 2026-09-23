@@ -407,7 +407,7 @@ ADMIN_HTML = """<!DOCTYPE html>
 
       <!-- Tab 3: Fields Extractor -->
       <div x-show="activeTab === 'fields'" class="space-y-4 flex-1 overflow-y-auto pr-1">
-        <p class="text-xs text-slate-400">Выберите поля сделки, которые ИИ-экстрактор будет извлекать из диалога и автоматически сохранять в CRM:</p>
+        <p class="text-xs text-slate-400">Выберите поля сделки или контакта, которые ИИ-экстрактор будет извлекать из диалога и автоматически сохранять в CRM:</p>
         <div class="space-y-3">
           <template x-for="f in fields" :key="f.amo_field_id">
             <div class="p-3 bg-slate-800/60 rounded-xl border border-slate-700 space-y-2" :class="f.is_deleted_in_amo ? 'opacity-60 border-rose-900/40' : ''">
@@ -417,6 +417,15 @@ ADMIN_HTML = """<!DOCTYPE html>
                     <input type="checkbox" :checked="f.is_enabled" :disabled="f.is_deleted_in_amo" @change="f.is_enabled = $event.target.checked" class="rounded text-indigo-600 w-4 h-4 bg-slate-700 disabled:opacity-40">
                     <span class="text-sm font-medium" :class="f.is_deleted_in_amo ? 'text-slate-400 line-through' : 'text-white'" x-text="f.field_name"></span>
                   </label>
+                  <!-- Бейдж типа сущности -->
+                  <span x-show="!f.is_deleted_in_amo && f.entity_type === 'contact'"
+                        class="text-[10px] font-semibold px-2 py-0.5 rounded bg-sky-900/60 text-sky-300 border border-sky-700/50">
+                    <i class="fa-solid fa-user mr-0.5"></i> Контакт
+                  </span>
+                  <span x-show="!f.is_deleted_in_amo && (f.entity_type === 'lead' || !f.entity_type)"
+                        class="text-[10px] font-semibold px-2 py-0.5 rounded bg-violet-900/60 text-violet-300 border border-violet-700/50">
+                    <i class="fa-solid fa-handshake mr-0.5"></i> Сделка
+                  </span>
                   <span x-show="f.is_deleted_in_amo" class="text-[10px] font-semibold px-2 py-0.5 rounded bg-rose-900/60 text-rose-300 border border-rose-700/50">
                     <i class="fa-solid fa-triangle-exclamation mr-0.5"></i> Удалено в amoCRM
                   </span>
@@ -454,8 +463,8 @@ ADMIN_HTML = """<!DOCTYPE html>
             <label class="text-xs font-semibold text-indigo-300 flex items-center gap-1.5">
               <i class="fa-solid fa-book-bookmark text-indigo-400"></i> Каталог продуктов и База знаний
             </label>
-            <span class="text-[11px] text-slate-400" x-show="aiConfig.knowledge_base">
-              Символов: <span class="font-mono text-indigo-300" x-text="aiConfig.knowledge_base.length"></span>
+            <span class="text-[11px] text-slate-400" x-show="aiConfig && aiConfig.knowledge_base">
+              Символов: <span class="font-mono text-indigo-300" x-text="(aiConfig && aiConfig.knowledge_base) ? aiConfig.knowledge_base.length : 0"></span>
             </span>
           </div>
 
@@ -489,12 +498,30 @@ ADMIN_HTML = """<!DOCTYPE html>
 
         <div class="grid grid-cols-2 gap-3">
           <div>
-            <label class="block text-xs font-medium text-slate-300 mb-1">Модель Общителя</label>
+            <label class="block text-xs font-medium text-slate-300 mb-1">Модель Общителя (Основная)</label>
             <input type="text" x-model="aiConfig.communicator_model" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
           </div>
           <div>
-            <label class="block text-xs font-medium text-slate-300 mb-1">Модель Экстрактора</label>
+            <label class="block text-xs font-medium text-slate-300 mb-1">Модель Экстрактора (Основная)</label>
             <input type="text" x-model="aiConfig.extractor_model" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-slate-300 mb-1 flex items-center gap-1">
+              <i class="fa-solid fa-shield-halved text-emerald-400 text-[11px]"></i>
+              <span>Запасная модель Общителя</span>
+            </label>
+            <input type="text" x-model="aiConfig.fallback_communicator_model" placeholder="gemini-2.5-flash" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
+            <div class="text-[10px] text-slate-400 mt-0.5">Включается при сбое/перегрузке (503, 429, таймаут)</div>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-slate-300 mb-1 flex items-center gap-1">
+              <i class="fa-solid fa-shield-halved text-emerald-400 text-[11px]"></i>
+              <span>Запасная модель Экстрактора</span>
+            </label>
+            <input type="text" x-model="aiConfig.fallback_extractor_model" placeholder="gemini-2.5-flash" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
+            <div class="text-[10px] text-slate-400 mt-0.5">Включается при сбое/перегрузке для извлечения полей</div>
           </div>
         </div>
         <div class="grid grid-cols-2 gap-3">
@@ -527,8 +554,17 @@ ADMIN_HTML = """<!DOCTYPE html>
         selectedBotId: '',
         availableBots: [],
         pipelines: [],
-        fields: [],
-        aiConfig: {},
+        aiConfig: {
+          communicator_prompt: '',
+          communicator_model: 'gemini-3.1-flash-lite',
+          fallback_communicator_model: 'gemini-2.5-flash',
+          extractor_model: 'gemini-3.1-flash-lite',
+          fallback_extractor_model: 'gemini-2.5-flash',
+          temperature: 0.4,
+          handover_after_stuck: 4,
+          knowledge_base: '',
+          knowledge_mode: 'plain_text'
+        },
         form: {
           subdomain: '',
           name: '',
@@ -794,8 +830,12 @@ ADMIN_HTML = """<!DOCTYPE html>
             const data = await res.json();
             if (!data.knowledge_mode) data.knowledge_mode = 'plain_text';
             if (!data.knowledge_base) data.knowledge_base = '';
+            if (!data.fallback_communicator_model) data.fallback_communicator_model = 'gemini-2.5-flash';
+            if (!data.fallback_extractor_model) data.fallback_extractor_model = 'gemini-2.5-flash';
             this.aiConfig = data;
-          } catch (e) {}
+          } catch (e) {
+            console.error('Ошибка загрузки настроек ИИ:', e);
+          }
         },
         async saveAIConfig() {
           try {

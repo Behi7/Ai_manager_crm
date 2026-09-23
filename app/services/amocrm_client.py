@@ -275,7 +275,8 @@ class AmoCRMClient:
                     {
                         "id": f.get("id"),
                         "name": f.get("name"),
-                        "type": f.get("type")
+                        "type": f.get("type"),
+                        "entity_type": "lead"
                     }
                     for f in fields
                 ]
@@ -284,6 +285,36 @@ class AmoCRMClient:
             raise
         except (httpx.RequestError, httpx.TimeoutException) as net_err:
             logger.error(f"Сетевая ошибка в list_custom_fields ({subdomain}): {net_err}")
+            return []
+
+    async def list_contact_custom_fields(self, subdomain: str, token: str) -> List[Dict[str, Any]]:
+        """
+        Получение списка кастомных полей контактов.
+        GET /api/v4/contacts/custom_fields
+        """
+        await self.rate_limiter.wait(subdomain)
+        url = f"{self._base_url(subdomain)}/api/v4/contacts/custom_fields?limit=250"
+        try:
+            client = await self.get_client()
+            resp = await client.get(url, headers=self._headers(token))
+            self._check_http_auth_or_billing(resp, subdomain)
+            if resp.status_code == 200:
+                data = resp.json()
+                fields = data.get("_embedded", {}).get("custom_fields", [])
+                return [
+                    {
+                        "id": f.get("id"),
+                        "name": f.get("name"),
+                        "type": f.get("type"),
+                        "entity_type": "contact"
+                    }
+                    for f in fields
+                ]
+            return []
+        except AmoCRMAuthOrBillingError:
+            raise
+        except (httpx.RequestError, httpx.TimeoutException) as net_err:
+            logger.error(f"Сетевая ошибка в list_contact_custom_fields ({subdomain}): {net_err}")
             return []
 
     async def patch_lead_field(
@@ -354,6 +385,40 @@ class AmoCRMClient:
             raise
         except (httpx.RequestError, httpx.TimeoutException) as net_err:
             logger.error(f"Сетевая ошибка в patch_lead_custom_fields (#{lead_id}, {subdomain}): {net_err}")
+            return False
+
+    async def patch_contact_custom_fields(
+        self,
+        subdomain: str,
+        contact_id: int,
+        fields: List[Dict[str, Any]],
+        token: str = "",
+        access_token: Optional[str] = None
+    ) -> bool:
+        """
+        Запись полей контакта от Экстрактора.
+        PATCH /api/v4/contacts/{contact_id}
+        """
+        t = token or access_token or ""
+        if not fields:
+            return True
+        await self.rate_limiter.wait(subdomain)
+        url = f"{self._base_url(subdomain)}/api/v4/contacts/{contact_id}"
+        payload = {"custom_fields_values": fields}
+        try:
+            client = await self.get_client()
+            resp = await client.patch(url, json=payload, headers=self._headers(t))
+            self._check_http_auth_or_billing(resp, subdomain)
+            if resp.status_code in [200, 201]:
+                logger.info(f"📊 Экстрактор обновил {len(fields)} полей в контакте #{contact_id} ({subdomain})")
+                return True
+            else:
+                logger.error(f"Ошибка обновления полей контакта #{contact_id}: HTTP {resp.status_code} {resp.text}")
+                return False
+        except AmoCRMAuthOrBillingError:
+            raise
+        except (httpx.RequestError, httpx.TimeoutException) as net_err:
+            logger.error(f"Сетевая ошибка в patch_contact_custom_fields (#{contact_id}, {subdomain}): {net_err}")
             return False
 
     async def run_salesbot(
@@ -438,10 +503,10 @@ class AmoCRMClient:
             return False
 
     async def get_lead(self, subdomain: str, token: str = "", lead_id: int = 0, access_token: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Получение данных сделки (включая pipeline_id)"""
+        """Получение данных сделки (включая pipeline_id и прикрепленные контакты)"""
         t = token or access_token or ""
         await self.rate_limiter.wait(subdomain)
-        url = f"{self._base_url(subdomain)}/api/v4/leads/{lead_id}"
+        url = f"{self._base_url(subdomain)}/api/v4/leads/{lead_id}?with=contacts"
         try:
             client = await self.get_client()
             resp = await client.get(url, headers=self._headers(t))
@@ -453,6 +518,25 @@ class AmoCRMClient:
             raise
         except (httpx.RequestError, httpx.TimeoutException) as net_err:
             logger.error(f"Сетевая ошибка в get_lead (lead={lead_id}, {subdomain}): {net_err}")
+            return None
+
+    async def get_contact(self, subdomain: str, contact_id: int, token: str = "", access_token: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Получение данных контакта из amoCRM (включая custom_fields_values)"""
+        t = token or access_token or ""
+        await self.rate_limiter.wait(subdomain)
+        url = f"{self._base_url(subdomain)}/api/v4/contacts/{contact_id}"
+        try:
+            client = await self.get_client()
+            resp = await client.get(url, headers=self._headers(t))
+            self._check_http_auth_or_billing(resp, subdomain)
+            if resp.status_code == 200:
+                return resp.json()
+            logger.warning(f"get_contact: HTTP {resp.status_code} для contact_id={contact_id} ({subdomain})")
+            return None
+        except AmoCRMAuthOrBillingError:
+            raise
+        except (httpx.RequestError, httpx.TimeoutException) as net_err:
+            logger.error(f"Сетевая ошибка в get_contact (contact_id={contact_id}, {subdomain}): {net_err}")
             return None
 
     async def get_latest_lead(self, subdomain: str, token: str = "", pipeline_id: Optional[int] = None, access_token: Optional[str] = None) -> Optional[Dict[str, Any]]:
