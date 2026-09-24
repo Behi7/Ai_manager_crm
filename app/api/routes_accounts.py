@@ -46,6 +46,7 @@ class UpdatePipelinesRequest(BaseModel):
 
 class FieldMappingUpdate(BaseModel):
     amo_field_id: int
+    entity_type: Optional[str] = "lead"
     is_enabled: bool
     ai_hint: Optional[str] = None
     overwrite_if_filled: bool = False
@@ -114,7 +115,10 @@ async def create_or_connect_account(payload: CreateAccountRequest):
     account_name = payload.name or token_check.get("account_name") or token_check.get("name") or subdomain
 
     # 2. Создание/проверка поля 'AI: Ответ ассистента'
-    field_id = await amocrm_client.ensure_reply_field(subdomain, token)
+    try:
+        field_id = await amocrm_client.ensure_reply_field(subdomain, token)
+    except AmoCRMAuthOrBillingError as auth_err:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=auth_err.detail)
     if not field_id:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -206,7 +210,10 @@ async def create_or_connect_account(payload: CreateAccountRequest):
     webhook_dest_url = f"{settings.BASE_URL}/webhook/{account_uuid_str}"
 
     # 4. Автоматическая регистрация вебхука (внешний HTTP-вызов БЕЗ удержания транзакции БД)
-    wh_id = await amocrm_client.try_register_webhook(subdomain, token, webhook_dest_url)
+    try:
+        wh_id = await amocrm_client.try_register_webhook(subdomain, token, webhook_dest_url)
+    except AmoCRMAuthOrBillingError:
+        wh_id = None
     if wh_id:
         auto_registered = True
         async with AsyncSessionLocal() as session:
@@ -847,8 +854,9 @@ async def update_account_fields(account_id: uuid.UUID, payload: UpdateFieldsRequ
 
         for item in payload.fields:
             m = None
-            if item.entity_type and (item.entity_type, item.amo_field_id) in mapping_by_tuple:
-                m = mapping_by_tuple[(item.entity_type, item.amo_field_id)]
+            norm_ent = _norm_entity(getattr(item, "entity_type", None))
+            if (norm_ent, item.amo_field_id) in mapping_by_tuple:
+                m = mapping_by_tuple[(norm_ent, item.amo_field_id)]
             elif item.amo_field_id in mapping_by_id:
                 m = mapping_by_id[item.amo_field_id]
             if m is not None:
@@ -994,7 +1002,10 @@ async def sync_account_with_amocrm(account_id: uuid.UUID):
     new_account_name = token_check.get("account_name")
     new_account_id = token_check.get("account_id")
 
-    reply_field_id = await amocrm_client.ensure_reply_field(subdomain, token)
+    try:
+        reply_field_id = await amocrm_client.ensure_reply_field(subdomain, token)
+    except AmoCRMAuthOrBillingError:
+        reply_field_id = None
 
     pipelines_synced = False
     try:

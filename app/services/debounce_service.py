@@ -87,6 +87,7 @@ class DebounceService:
         texts: List[str] = []
         attachments: List[Dict[str, Any]] = []
         is_comment = False
+        max_retry_count = 0
 
         for item_str in raw_items:
             try:
@@ -100,6 +101,9 @@ class DebounceService:
                         attachments.append(att)
                     if parsed.get("is_comment"):
                         is_comment = True
+                    rc = int(parsed.get("retry_count", 0) or 0)
+                    if rc > max_retry_count:
+                        max_retry_count = rc
                 else:
                     if item_str.strip():
                         texts.append(item_str.strip())
@@ -112,6 +116,7 @@ class DebounceService:
             "texts": texts,
             "attachments": attachments,
             "is_comment": is_comment,
+            "retry_count": max_retry_count,
             "raw_items": list(raw_items) if raw_items else []
         }
 
@@ -136,11 +141,23 @@ class DebounceService:
             r = await self.get_redis()
             key = f"debounce_msgs:{account_id}:{lead_id}"
 
+            retry_count = int(buffered_data.get("retry_count", 0) or 0) if isinstance(buffered_data, dict) else 0
             raw_items = buffered_data.get("raw_items") if isinstance(buffered_data, dict) else None
             if raw_items:
-                await r.lpush(key, *reversed(raw_items))
+                updated_raw = []
+                for item_str in raw_items:
+                    try:
+                        p = json.loads(item_str)
+                        if isinstance(p, dict):
+                            p["retry_count"] = retry_count
+                            updated_raw.append(json.dumps(p, ensure_ascii=False))
+                        else:
+                            updated_raw.append(item_str)
+                    except Exception:
+                        updated_raw.append(item_str)
+                await r.lpush(key, *reversed(updated_raw))
                 await r.expire(key, 300)
-                logger.info(f"🔄 Восстановлено {len(raw_items)} исходных сообщений в буфер {account_id}:{lead_id} после сбоя.")
+                logger.info(f"🔄 Восстановлено {len(updated_raw)} исходных сообщений в буфер {account_id}:{lead_id} после сбоя (retry={retry_count}).")
                 return
 
             items_to_push = []
@@ -199,7 +216,7 @@ class DebounceService:
                 """
                 await r.eval(lua_script, 1, key, tok)
             else:
-                await r.delete(key)
+                logger.debug(f"Токен лока для {lock_id} отсутствует, пропускаем удаление ключа в Redis.")
         except Exception as e:
             logger.warning(f"Ошибка снятия Redis-лока {lock_id}: {e}")
 

@@ -56,9 +56,10 @@ class LLMExtractor:
         fields_desc = []
         schema_props = {}
         for fm in enabled_fields:
-            prop_key = f"field_{fm.amo_field_id}"
+            entity = (fm.entity_type if isinstance(getattr(fm, "entity_type", None), str) and fm.entity_type in ("lead", "contact") else "lead")
+            prop_key = f"field_{entity}_{fm.amo_field_id}"
             hint = f" ({fm.ai_hint})" if fm.ai_hint else ""
-            fields_desc.append(f'- key: "{prop_key}", Название: "{fm.field_name}"{hint}, Тип: {fm.field_type}')
+            fields_desc.append(f'- key: "{prop_key}", Название: "{fm.field_name}"{hint}, Сущность: {entity}, Тип: {fm.field_type}')
             
             # Схема типов для Gemini
             ft = (fm.field_type or "").lower()
@@ -207,14 +208,14 @@ class LLMExtractor:
         field_name_values = {}
 
         for fm in enabled_fields:
-            prop_key = f"field_{fm.amo_field_id}"
-            val = parsed.get(prop_key)
+            entity = (fm.entity_type if isinstance(getattr(fm, "entity_type", None), str) and fm.entity_type in ("lead", "contact") else "lead")
+            prop_key = f"field_{entity}_{fm.amo_field_id}"
+            val = parsed.get(prop_key, parsed.get(f"field_{fm.amo_field_id}"))
             if val is None or val == "" or val == "null":
                 continue
 
             # Проверяем, заполнено ли уже поле и разрешена ли перезапись
             if not fm.overwrite_if_filled:
-                entity = (fm.entity_type if isinstance(getattr(fm, "entity_type", None), str) and fm.entity_type in ("lead", "contact") else "lead")
                 existing = current_values.get((entity, fm.amo_field_id), current_values.get(fm.amo_field_id))
                 if existing is not None and existing != "":
                     # Пропускаем, так как перезапись отключена
@@ -226,6 +227,7 @@ class LLMExtractor:
 
             fields_to_update.append({
                 "field_id": fm.amo_field_id,
+                "entity_type": entity,
                 "values": [val_obj]
             })
             field_name_values[fm.field_name] = val

@@ -188,6 +188,7 @@ class DeliveryService:
             return
 
         # 3. Запуск пайплайна без удержания глобальной сессии БД
+        delivery_state: Dict[str, Any] = {"bot_ok": False, "user_msg_id": None}
         try:
             await self._execute_lead_pipeline(
                 session=None,
@@ -200,19 +201,45 @@ class DeliveryService:
                 subdomain=subdomain,
                 buffered_texts=buffered_texts,
                 buffered_attachments=buffered_attachments,
-                is_comment=is_comment
+                is_comment=is_comment,
+                delivery_state=delivery_state,
             )
         except BaseException as pipe_err:
-            logger.warning(
-                f"Сбой в пайплайне лида {lead_id_str} ({type(pipe_err).__name__}). "
-                f"Восстановление сообщений в буфер Redis (CRITICAL-01)..."
-            )
-            try:
-                await asyncio.shield(
-                    debounce_service.restore_buffered_messages(account_id_str, lead_id_str, buffered_data)
+            if delivery_state.get("user_msg_id") and not delivery_state.get("bot_ok"):
+                try:
+                    async with AsyncSessionLocal() as cleanup_db:
+                        msg_to_del = (
+                            await cleanup_db.execute(
+                                select(ConversationMessage).where(ConversationMessage.id == delivery_state["user_msg_id"])
+                            )
+                        ).scalar_one_or_none()
+                        if msg_to_del:
+                            await cleanup_db.delete(msg_to_del)
+                            await cleanup_db.commit()
+                except Exception as del_err:
+                    logger.warning(f"Не удалось откатить user_msg {delivery_state['user_msg_id']}: {del_err}")
+
+            if isinstance(pipe_err, AmoCRMAuthOrBillingError) or delivery_state.get("bot_ok"):
+                raise
+
+            retries = int(buffered_data.get("retry_count", 0) or 0) if isinstance(buffered_data, dict) else 0
+            if retries < 2:
+                if isinstance(buffered_data, dict):
+                    buffered_data["retry_count"] = retries + 1
+                logger.warning(
+                    f"Сбой в пайплайне лида {lead_id_str} ({type(pipe_err).__name__}). "
+                    f"Восстановление сообщений в буфер Redis (попытка {retries + 1}/2)..."
                 )
-            except Exception as res_err:
-                logger.error(f"Не удалось восстановить буфер для {account_id_str}:{lead_id_str}: {res_err}")
+                try:
+                    await asyncio.shield(
+                        debounce_service.restore_buffered_messages(account_id_str, lead_id_str, buffered_data)
+                    )
+                except Exception as res_err:
+                    logger.error(f"Не удалось восстановить буфер для {account_id_str}:{lead_id_str}: {res_err}")
+            else:
+                logger.error(
+                    f"Превышен лимит попыток восстановления буфера (2/2) для лида {lead_id_str}. Сообщения сброшены."
+                )
             raise
 
     async def _execute_lead_pipeline(
@@ -227,7 +254,8 @@ class DeliveryService:
         subdomain: str,
         buffered_texts: List[str],
         buffered_attachments: List[Dict[str, Any]],
-        is_comment: bool = False
+        is_comment: bool = False,
+        delivery_state: Optional[Dict[str, Any]] = None,
     ):
         # 1. Внешний HTTP-вызов: Скачиваем медиавложения (БЕЗ удержания сессии БД)
         media_parts: List[Dict[str, Any]] = []
@@ -346,6 +374,8 @@ class DeliveryService:
             db.add(user_msg)
             await db.flush()
             user_msg_id = user_msg.id
+            if delivery_state is not None:
+                delivery_state['user_msg_id'] = user_msg_id
             lead.last_message_at = datetime.now(timezone.utc)
             await db.commit()
 
@@ -593,6 +623,8 @@ class DeliveryService:
             entity_id=amo_lead_id
         )
 
+        if delivery_state is not None:
+            delivery_state['bot_ok'] = bool(bot_ok)
         if not bot_ok:
             logger.warning(f"Salesbot {account.bot_id} вернул ошибку при запуске для лида {amo_lead_id}")
 
@@ -666,7 +698,7 @@ class DeliveryService:
                 media_parts=media_parts
             )
 
-            disabled_field_ids = set()
+            disabled_field_keys = set()
             if ext_result.fields_to_update:
                 logger.info(f"Экстрактор нашел поля для лида {amo_lead_id}: {ext_result.field_name_values}")
 
@@ -704,9 +736,10 @@ class DeliveryService:
                             )
                             if not single_ok:
                                 logger.error(f"Поле #{fid} отклонено amoCRM (вероятно, удалено). Автоматически отключаем маппинг.")
-                                disabled_field_ids.add(fid)
+                                disabled_field_keys.add(("lead", fid))
                                 for fm in account.field_mappings:
-                                    if fm.amo_field_id == fid:
+                                    fm_ent = fm.entity_type if isinstance(getattr(fm, "entity_type", None), str) and fm.entity_type in ("lead", "contact") else "lead"
+                                    if fm.amo_field_id == fid and fm_ent == "lead":
                                         fm.is_enabled = False
 
                 target_contact_id = contact_id or (contact_amo_data.get("id") if contact_amo_data else None)
@@ -733,25 +766,29 @@ class DeliveryService:
                                 )
                                 if not single_ok:
                                     logger.error(f"Поле контакта #{fid} отклонено amoCRM. Отключаем маппинг.")
-                                    disabled_field_ids.add(fid)
+                                    disabled_field_keys.add(("contact", fid))
                                     for fm in account.field_mappings:
-                                        if fm.amo_field_id == fid:
+                                        fm_ent = fm.entity_type if isinstance(getattr(fm, "entity_type", None), str) and fm.entity_type in ("lead", "contact") else "lead"
+                                        if fm.amo_field_id == fid and fm_ent == "contact":
                                             fm.is_enabled = False
                     else:
                         logger.warning(f"Нет contact_id для записи полей контакта в лиде #{amo_lead_id}.")
 
                 # 9. Короткая сессия БД №3: Сохранение логов экстрактора и отключение удаленных полей
                 async with self._session_scope(session) as db:
-                    if disabled_field_ids:
+                    if disabled_field_keys:
+                        disabled_ids = [fid for _, fid in disabled_field_keys]
                         fms = (await db.execute(
                             select(FieldMapping).where(
                                 FieldMapping.account_id == account_uuid,
-                                FieldMapping.amo_field_id.in_(list(disabled_field_ids))
+                                FieldMapping.amo_field_id.in_(disabled_ids)
                             )
                         )).scalars().all()
                         if isinstance(fms, (list, tuple)):
                             for f_obj in fms:
-                                f_obj.is_enabled = False
+                                f_ent = f_obj.entity_type if isinstance(getattr(f_obj, "entity_type", None), str) and f_obj.entity_type in ("lead", "contact") else "lead"
+                                if (f_ent, f_obj.amo_field_id) in disabled_field_keys:
+                                    f_obj.is_enabled = False
 
                     ext_log = ExtractionLog(
                         lead_id=lead_db_id,
