@@ -18,6 +18,9 @@ from app.services.debounce_service import debounce_service
 
 logger = logging.getLogger("AccountsRouter")
 
+def _norm_entity(val) -> str:
+    return val if isinstance(val, str) and val in ("lead", "contact") else "lead"
+
 router = APIRouter(prefix="/accounts", tags=["Accounts & Onboarding"], dependencies=[Depends(verify_admin_key)])
 
 
@@ -731,7 +734,7 @@ async def get_account_fields(account_id: uuid.UUID):
         raise HTTPException(status_code=400, detail=auth_err.detail)
 
     amo_fields = lead_fields + contact_fields
-    amo_field_keys = {(af.get("entity_type", "lead"), af["id"]) for af in amo_fields}
+    amo_field_keys = {(_norm_entity(af.get("entity_type", "lead")), af["id"]) for af in amo_fields}
 
     # Сессия 2: Синхронизация с БД в короткой сессии (с row-level блокировкой от гонок INSERT)
     async with AsyncSessionLocal() as session:
@@ -750,7 +753,7 @@ async def get_account_fields(account_id: uuid.UUID):
             await session.delete(fm)
             account.field_mappings.remove(fm)
 
-        existing_map = {(getattr(fm, "entity_type", None) or "lead", fm.amo_field_id): fm for fm in account.field_mappings}
+        existing_map = {(_norm_entity(getattr(fm, "entity_type", None)), fm.amo_field_id): fm for fm in account.field_mappings}
         for af in amo_fields:
             af_id = af["id"]
             if af_id in reply_ids:
@@ -758,7 +761,7 @@ async def get_account_fields(account_id: uuid.UUID):
             if af.get("name") in ("AI: Ответ ассистента", "Ответ ИИ"):
                 continue
 
-            entity = af.get("entity_type", "lead")
+            entity = _norm_entity(af.get("entity_type", "lead"))
             if (entity, af_id) in existing_map:
                 existing_map[(entity, af_id)].field_name = af["name"]
                 existing_map[(entity, af_id)].field_type = af.get("type", "text")
@@ -778,7 +781,7 @@ async def get_account_fields(account_id: uuid.UUID):
 
         # Автоматически отключаем поля, которые удалили в amoCRM
         for fm in account.field_mappings:
-            fm_entity = getattr(fm, "entity_type", None) or "lead"
+            fm_entity = _norm_entity(getattr(fm, "entity_type", None))
             if (fm_entity, fm.amo_field_id) not in amo_field_keys:
                 if fm.is_enabled:
                     logger.warning(
@@ -811,7 +814,7 @@ async def get_account_fields(account_id: uuid.UUID):
                 "is_enabled": fm.is_enabled,
                 "ai_hint": fm.ai_hint,
                 "overwrite_if_filled": fm.overwrite_if_filled,
-                "is_deleted_in_amo": ((getattr(fm, "entity_type", None) or "lead"), fm.amo_field_id) not in amo_field_keys
+                "is_deleted_in_amo": ((_norm_entity(getattr(fm, "entity_type", None))), fm.amo_field_id) not in amo_field_keys
             }
             for fm in all_mappings
         ]
@@ -839,7 +842,7 @@ async def update_account_fields(account_id: uuid.UUID, payload: UpdateFieldsRequ
     async with AsyncSessionLocal() as session:
         stmt = select(FieldMapping).where(FieldMapping.account_id == account_id)
         mappings = (await session.execute(stmt)).scalars().all()
-        mapping_by_tuple = {((getattr(m, "entity_type", None) or "lead"), m.amo_field_id): m for m in mappings}
+        mapping_by_tuple = {((_norm_entity(getattr(m, "entity_type", None))), m.amo_field_id): m for m in mappings}
         mapping_by_id = {m.amo_field_id: m for m in mappings}
 
         for item in payload.fields:
@@ -1071,7 +1074,7 @@ async def sync_account_with_amocrm(account_id: uuid.UUID):
 
         deleted_fields_count = 0
         if fields_synced:
-            amo_field_keys = {(af.get("entity_type", "lead"), af["id"]) for af in amo_fields}
+            amo_field_keys = {(_norm_entity(af.get("entity_type", "lead")), af["id"]) for af in amo_fields}
 
             reply_ids = {account.ai_reply_field_id} if account.ai_reply_field_id else set()
             to_remove = [
@@ -1082,7 +1085,7 @@ async def sync_account_with_amocrm(account_id: uuid.UUID):
                 await session.delete(fm)
                 account.field_mappings.remove(fm)
 
-            existing_fields = {(getattr(fm, "entity_type", None) or "lead", fm.amo_field_id): fm for fm in account.field_mappings}
+            existing_fields = {(_norm_entity(getattr(fm, "entity_type", None)), fm.amo_field_id): fm for fm in account.field_mappings}
             for af in amo_fields:
                 af_id = af["id"]
                 if af_id in reply_ids:
@@ -1090,7 +1093,7 @@ async def sync_account_with_amocrm(account_id: uuid.UUID):
                 if af.get("name") in ("AI: Ответ ассистента", "Ответ ИИ"):
                     continue
 
-                entity = af.get("entity_type", "lead")
+                entity = _norm_entity(af.get("entity_type", "lead"))
                 if (entity, af_id) in existing_fields:
                     existing_fields[(entity, af_id)].field_name = af["name"]
                     existing_fields[(entity, af_id)].field_type = af.get("type", "text")
@@ -1109,7 +1112,7 @@ async def sync_account_with_amocrm(account_id: uuid.UUID):
                     session.add(new_fm)
 
             for fm in account.field_mappings:
-                fm_entity = getattr(fm, "entity_type", None) or "lead"
+                fm_entity = _norm_entity(getattr(fm, "entity_type", None))
                 if (fm_entity, fm.amo_field_id) not in amo_field_keys:
                     if fm.is_enabled:
                         fm.is_enabled = False

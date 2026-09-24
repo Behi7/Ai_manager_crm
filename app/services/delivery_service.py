@@ -389,7 +389,7 @@ class DeliveryService:
             if fm.amo_field_id == account.ai_reply_field_id:
                 continue
 
-            fm_entity = getattr(fm, "entity_type", None) or "lead"
+            fm_entity = (fm.entity_type if isinstance(getattr(fm, "entity_type", None), str) and fm.entity_type in ("lead", "contact") else "lead")
             fm_key = (fm_entity, fm.amo_field_id)
             if fm_key in amo_cf_values:
                 known_fields[fm.field_name] = amo_cf_values[fm_key]
@@ -670,7 +670,7 @@ class DeliveryService:
             if ext_result.fields_to_update:
                 logger.info(f"Экстрактор нашел поля для лида {amo_lead_id}: {ext_result.field_name_values}")
 
-                fm_entity_map = {fm.amo_field_id: getattr(fm, "entity_type", "lead") for fm in account.field_mappings}
+                fm_entity_map = {fm.amo_field_id: (fm.entity_type if isinstance(getattr(fm, "entity_type", None), str) and fm.entity_type in ("lead", "contact") else "lead") for fm in account.field_mappings}
                 lead_fields_to_update = []
                 contact_fields_to_update = []
                 for item in ext_result.fields_to_update:

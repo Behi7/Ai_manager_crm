@@ -214,7 +214,7 @@ class LLMExtractor:
 
             # Проверяем, заполнено ли уже поле и разрешена ли перезапись
             if not fm.overwrite_if_filled:
-                entity = getattr(fm, "entity_type", None) or "lead"
+                entity = (fm.entity_type if isinstance(getattr(fm, "entity_type", None), str) and fm.entity_type in ("lead", "contact") else "lead")
                 existing = current_values.get((entity, fm.amo_field_id), current_values.get(fm.amo_field_id))
                 if existing is not None and existing != "":
                     # Пропускаем, так как перезапись отключена
