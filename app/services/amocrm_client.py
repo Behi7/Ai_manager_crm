@@ -1,4 +1,6 @@
 import asyncio
+import ipaddress
+import socket
 import logging
 import time
 from typing import Any, Dict, List, Optional, Union, Tuple
@@ -671,12 +673,41 @@ class AmoCRMClient:
             target_url = f"{self._base_url(subdomain)}{target_url}"
 
         parsed = urlparse(target_url)
+        if parsed.scheme not in ("https", "http") or not parsed.hostname:
+            logger.warning(f"Отклонена некорректная схема URL вложения: {target_url}")
+            return None
+
+        hostname_lower = parsed.hostname.lower()
+        if hostname_lower in ("localhost", "0.0.0.0") or hostname_lower.endswith((".local", ".internal", ".lan")):
+            logger.error(f"Заблокирована попытка обращения к локальному хосту ({target_url})")
+            return None
+
+        try:
+            direct_ip = ipaddress.ip_address(hostname_lower)
+            if direct_ip.is_private or direct_ip.is_loopback or direct_ip.is_link_local or direct_ip.is_reserved or direct_ip.is_multicast:
+                logger.error(f"Заблокирована попытка обращения к внутреннему IP {direct_ip} ({target_url})")
+                return None
+        except ValueError:
+            pass
+
         is_amocrm_domain = (
-            parsed.netloc.endswith("amocrm.ru") or
-            "amojo" in parsed.netloc or
-            parsed.netloc.endswith("amocrm.com") or
-            parsed.netloc.endswith("kommo.com")
+            hostname_lower.endswith("amocrm.ru") or
+            "amojo" in hostname_lower or
+            hostname_lower.endswith("amocrm.com") or
+            hostname_lower.endswith("kommo.com")
         )
+
+        try:
+            addr_info = await asyncio.get_running_loop().getaddrinfo(parsed.hostname, None)
+            for item in addr_info:
+                ip_obj = ipaddress.ip_address(item[4][0])
+                if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local or ip_obj.is_reserved or ip_obj.is_multicast:
+                    logger.error(f"Заблокирована попытка обращения к внутреннему IP {ip_obj} ({target_url})")
+                    return None
+        except socket.gaierror:
+            if not is_amocrm_domain:
+                logger.warning(f"Не удалось разрешить DNS для хоста вложения: {parsed.hostname}")
+                return None
 
         headers = {}
         if token and is_amocrm_domain:

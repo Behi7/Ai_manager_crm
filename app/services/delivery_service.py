@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from app.core.database import AsyncSessionLocal
@@ -154,6 +155,16 @@ class DeliveryService:
                 access_token = decrypt_token(account.encrypted_token)
             except Exception as e:
                 logger.error(f"Не удалось расшифровать токен аккаунта {account_id_str}: {e}")
+                account.status = AccountStatus.ERROR
+                account.last_error = "Ошибка расшифровки токена amoCRM. Переподключите аккаунт."
+                account.is_active = False
+                await session.commit()
+                try:
+                    r_redis = await debounce_service.get_redis()
+                    await r_redis.set(f"acc_disabled:{account_id_str}", "1")
+                    await debounce_service.pop_buffered_messages(account_id_str, lead_id_str)
+                except Exception:
+                    pass
                 return
 
             subdomain = account.subdomain
@@ -293,15 +304,31 @@ class DeliveryService:
             lead = (await db.execute(lead_stmt)).scalar_one_or_none()
 
             if not lead:
-                lead = Lead(
-                    account_id=account_uuid,
-                    amo_lead_id=amo_lead_id,
-                    stuck_count=0,
-                    handover_required=False,
-                    last_message_at=datetime.now(timezone.utc)
-                )
-                db.add(lead)
-                await db.flush()
+                try:
+                    nested_ctx = db.begin_nested() if hasattr(db, "begin_nested") else None
+                    if nested_ctx is not None and hasattr(nested_ctx, "__aenter__"):
+                        async with nested_ctx:
+                            lead = Lead(
+                                account_id=account_uuid,
+                                amo_lead_id=amo_lead_id,
+                                stuck_count=0,
+                                handover_required=False,
+                                last_message_at=datetime.now(timezone.utc)
+                            )
+                            db.add(lead)
+                            await db.flush()
+                    else:
+                        lead = Lead(
+                            account_id=account_uuid,
+                            amo_lead_id=amo_lead_id,
+                            stuck_count=0,
+                            handover_required=False,
+                            last_message_at=datetime.now(timezone.utc)
+                        )
+                        db.add(lead)
+                        await db.flush()
+                except IntegrityError:
+                    lead = (await db.execute(lead_stmt)).scalar_one()
 
             if lead.handover_required:
                 logger.info(f"Лид {amo_lead_id} уже переведен на оператора (handover_required=True). Пропуск ответа ИИ.")
@@ -386,7 +413,17 @@ class DeliveryService:
         handover_limit = ai_config.handover_after_stuck if ai_config else 4
         knowledge_base = ai_config.knowledge_base if ai_config else None
         knowledge_mode = ai_config.knowledge_mode if ai_config else "plain_text"
-        gemini_cache_name = ai_config.gemini_cache_name if ai_config else None
+        now_utc = datetime.now(timezone.utc)
+        gemini_cache_name = (
+            ai_config.gemini_cache_name
+            if (
+                ai_config
+                and ai_config.gemini_cache_name
+                and getattr(ai_config, "gemini_cache_expires_at", None)
+                and ai_config.gemini_cache_expires_at > now_utc
+            )
+            else None
+        )
 
         # 5. Внешний HTTP-вызов: Генерация ответа в Gemini (БЕЗ сессии БД!)
         comm_resp = await communicator.generate_reply(

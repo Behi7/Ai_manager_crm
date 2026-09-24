@@ -2,7 +2,20 @@ from cryptography.fernet import Fernet, InvalidToken
 from fastapi import HTTPException
 from app.core.config import settings
 
-_cipher_suite = Fernet(settings.SECRET_KEY.encode() if isinstance(settings.SECRET_KEY, str) else settings.SECRET_KEY)
+import base64
+import hashlib
+
+def _build_cipher_suite() -> Fernet:
+    raw_key = settings.SECRET_KEY.encode("utf-8") if isinstance(settings.SECRET_KEY, str) else settings.SECRET_KEY
+    try:
+        return Fernet(raw_key)
+    except Exception:
+        # Если в .env задана произвольная строка вместо 32-байтного url-safe base64 ключа,
+        # детерминированно приводим её к валидному 32-байтному ключу Fernet через SHA-256
+        derived_key = base64.urlsafe_b64encode(hashlib.sha256(raw_key).digest())
+        return Fernet(derived_key)
+
+_cipher_suite = _build_cipher_suite()
 
 
 def encrypt_token(token: str) -> bytes:

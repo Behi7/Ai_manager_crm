@@ -111,7 +111,8 @@ class DebounceService:
         return {
             "texts": texts,
             "attachments": attachments,
-            "is_comment": is_comment
+            "is_comment": is_comment,
+            "raw_items": list(raw_items) if raw_items else []
         }
 
     async def restore_buffered_messages(
@@ -134,6 +135,13 @@ class DebounceService:
         try:
             r = await self.get_redis()
             key = f"debounce_msgs:{account_id}:{lead_id}"
+
+            raw_items = buffered_data.get("raw_items") if isinstance(buffered_data, dict) else None
+            if raw_items:
+                await r.lpush(key, *reversed(raw_items))
+                await r.expire(key, 300)
+                logger.info(f"🔄 Восстановлено {len(raw_items)} исходных сообщений в буфер {account_id}:{lead_id} после сбоя.")
+                return
 
             items_to_push = []
             for t in texts:
