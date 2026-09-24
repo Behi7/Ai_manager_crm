@@ -3,7 +3,7 @@ import base64
 import logging
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -424,6 +424,33 @@ class DeliveryService:
             )
             else None
         )
+
+        if (
+            not gemini_cache_name
+            and knowledge_mode == "gemini_cache"
+            and knowledge_base
+            and len(knowledge_base) >= 32000
+            and hasattr(communicator, "create_gemini_context_cache")
+        ):
+            try:
+                created_cache = await communicator.create_gemini_context_cache(
+                    system_prompt=prompt,
+                    knowledge_base=knowledge_base,
+                    model_name=comm_model,
+                    ttl_seconds=3600,
+                )
+                if isinstance(created_cache, str) and created_cache:
+                    gemini_cache_name = created_cache
+                    async with self._session_scope(session) as db:
+                        cfg_obj = (
+                            await db.execute(select(AIConfig).where(AIConfig.account_id == account_uuid))
+                        ).scalar_one_or_none()
+                        if cfg_obj:
+                            cfg_obj.gemini_cache_name = created_cache
+                            cfg_obj.gemini_cache_expires_at = now_utc + timedelta(seconds=3500)
+                            await db.commit()
+            except Exception as cache_err:
+                logger.warning(f"Не удалось создать/обновить Gemini Context Cache: {cache_err}")
 
         # 5. Внешний HTTP-вызов: Генерация ответа в Gemini (БЕЗ сессии БД!)
         comm_resp = await communicator.generate_reply(
