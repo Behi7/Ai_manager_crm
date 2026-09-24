@@ -65,7 +65,7 @@ class Account(Base):
     pipelines: Mapped[List["Pipeline"]] = relationship("Pipeline", back_populates="account", cascade="all, delete-orphan", lazy="selectin")
     field_mappings: Mapped[List["FieldMapping"]] = relationship("FieldMapping", back_populates="account", cascade="all, delete-orphan", lazy="selectin")
     ai_config: Mapped[Optional["AIConfig"]] = relationship("AIConfig", back_populates="account", uselist=False, cascade="all, delete-orphan", lazy="selectin")
-    leads: Mapped[List["Lead"]] = relationship("Lead", back_populates="account", cascade="all, delete-orphan", lazy="selectin")
+    leads: Mapped[List["Lead"]] = relationship("Lead", back_populates="account", cascade="all, delete-orphan", lazy="noload")
 
 
 class Pipeline(Base):
@@ -118,6 +118,18 @@ class FieldMapping(Base):
     )
 
 
+DEFAULT_COMMENT_PROMPT = (
+    "Ты — вежливый и дружелюбный ИИ-менеджер. Твоя задача — отвечать на комментарии клиентов под постами и Reels в соцсетях.\n\n"
+    "ПРАВИЛА ОТВЕТА:\n"
+    "1. Отвечай строго на том языке, на котором написал клиент (узбекский или русский).\n"
+    "2. Если клиент прислал '+', '++', огонёк '🔥', смайлик или вопрос о цене/наличии:\n"
+    "   - На узбекском: «Assalomu alaykum! Qiziqishingiz uchun rahmat. Narxlar va batafsil ma'lumotni Direct-ga yubordik 👉 {direct_link} (yoki shaxsiy xabarlaringizni tekshiring 📩)»\n"
+    "   - На русском: «Здравствуйте! Спасибо за интерес! Отправили подробности и цены вам в Direct 👉 {direct_link} (или проверьте личные сообщения 📩)»\n"
+    "3. Если клиент задал конкретный вопрос по товару или услуге — ответь на вопрос кратко (1-2 предложения) по базе знаний и обязательно предложи продолжить в Direct: {direct_link}.\n"
+    "4. Твой ответ публичный, поэтому держи его кратким, дружелюбным и без длинных списков вопросов."
+)
+
+
 class AIConfig(Base):
     __tablename__ = "ai_configs"
 
@@ -147,6 +159,8 @@ class AIConfig(Base):
     knowledge_mode: Mapped[str] = mapped_column(String(50), default="plain_text", nullable=False)
     gemini_cache_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     gemini_cache_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    comment_prompt: Mapped[Optional[str]] = mapped_column(Text, default=DEFAULT_COMMENT_PROMPT, nullable=True)
+    direct_link: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
     account: Mapped["Account"] = relationship("Account", back_populates="ai_config")
 

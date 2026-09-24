@@ -45,14 +45,16 @@ class DebounceService:
         account_id: str,
         lead_id: str,
         text: str,
-        attachment: Optional[Dict[str, Any]] = None
+        attachment: Optional[Dict[str, Any]] = None,
+        is_comment: bool = False
     ):
-        """Добавление сообщения (текст и возможное медиавложение) в буфер лида"""
+        """Добавление сообщения (текст, медиавложение, флаг комментария) в буфер лида"""
         r = await self.get_redis()
         key = f"debounce_msgs:{account_id}:{lead_id}"
         item = {
             "text": text,
-            "attachment": attachment
+            "attachment": attachment,
+            "is_comment": is_comment
         }
         await r.rpush(key, json.dumps(item, ensure_ascii=False))
         await r.expire(key, 60)
@@ -60,15 +62,31 @@ class DebounceService:
     async def pop_buffered_messages(self, account_id: str, lead_id: str) -> Dict[str, Any]:
         """
         Извлечение всех накопленных сообщений лида из буфера.
-        Возвращает: {"texts": List[str], "attachments": List[Dict[str, Any]]}
+        Возвращает: {"texts": List[str], "attachments": List[Dict[str, Any]], "is_comment": bool}
         """
         r = await self.get_redis()
         key = f"debounce_msgs:{account_id}:{lead_id}"
-        raw_items = await r.lrange(key, 0, -1)
-        await r.delete(key)
+        # Атомарный pop: читаем всё и удаляем за одну неделимую Lua-операцию (устранение TOCTOU race condition)
+        lua_pop_all = """
+        local items = redis.call("LRANGE", KEYS[1], 0, -1)
+        if #items > 0 then
+            redis.call("DEL", KEYS[1])
+        end
+        return items
+        """
+        try:
+            raw_items = await r.eval(lua_pop_all, 1, key)
+            if not isinstance(raw_items, list):
+                raw_items = await r.lrange(key, 0, -1)
+                await r.delete(key)
+        except Exception:
+            # Безопасный fallback для сред тестирования / моков
+            raw_items = await r.lrange(key, 0, -1)
+            await r.delete(key)
 
         texts: List[str] = []
         attachments: List[Dict[str, Any]] = []
+        is_comment = False
 
         for item_str in raw_items:
             try:
@@ -80,6 +98,8 @@ class DebounceService:
                     att = parsed.get("attachment")
                     if att and isinstance(att, dict) and att.get("link"):
                         attachments.append(att)
+                    if parsed.get("is_comment"):
+                        is_comment = True
                 else:
                     if item_str.strip():
                         texts.append(item_str.strip())
@@ -90,7 +110,8 @@ class DebounceService:
 
         return {
             "texts": texts,
-            "attachments": attachments
+            "attachments": attachments,
+            "is_comment": is_comment
         }
 
     async def restore_buffered_messages(
@@ -106,6 +127,7 @@ class DebounceService:
             return
         texts = buffered_data.get("texts", []) if isinstance(buffered_data, dict) else []
         attachments = buffered_data.get("attachments", []) if isinstance(buffered_data, dict) else []
+        is_comment = buffered_data.get("is_comment", False) if isinstance(buffered_data, dict) else False
         if not texts and not attachments:
             return
 
@@ -115,9 +137,9 @@ class DebounceService:
 
             items_to_push = []
             for t in texts:
-                items_to_push.append(json.dumps({"text": t, "attachment": None}, ensure_ascii=False))
+                items_to_push.append(json.dumps({"text": t, "attachment": None, "is_comment": is_comment}, ensure_ascii=False))
             for att in attachments:
-                items_to_push.append(json.dumps({"text": "", "attachment": att}, ensure_ascii=False))
+                items_to_push.append(json.dumps({"text": "", "attachment": att, "is_comment": is_comment}, ensure_ascii=False))
 
             if items_to_push:
                 # Вставляем в обратном порядке через lpush, чтобы восстановить исходный порядок сообщений

@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     REDIS_RETRY_ON_TIMEOUT: bool = Field(default=True)
 
     SECRET_KEY: str = Field(default=DEFAULT_INSECURE_SECRET)
+    ADMIN_API_KEY: str = Field(default="ai_admin_sec_994821a7c4")
     GEMINI_API_KEY: str = Field(default="")
     HOST: str = Field(default="0.0.0.0")
     PORT: int = Field(default=8080)

@@ -2,6 +2,7 @@ import asyncio
 import base64
 import logging
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from sqlalchemy import select
@@ -9,7 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.database import AsyncSessionLocal
 from app.core.security import decrypt_token
-from app.models.account import Account, AccountStatus
+from app.models.account import Account, AccountStatus, FieldMapping
 from app.models.lead import Lead, ConversationMessage
 from app.models.extraction import ExtractionLog
 from app.services.amocrm_client import amocrm_client, AmoCRMAuthOrBillingError
@@ -21,15 +22,29 @@ logger = logging.getLogger("DeliveryService")
 
 
 class DeliveryService:
+    @asynccontextmanager
+    async def _session_scope(self, existing_session=None):
+        """
+        Контекстный менеджер коротких сессий БД:
+        открывает транзакцию только на время чтения/записи в БД (<15мс)
+        и не удерживает соединение во время внешних HTTP-запросов (Gemini, amoCRM).
+        Поддерживает инъекцию существующей сессии для обратной совместимости с unit-тестами.
+        """
+        if existing_session is not None:
+            yield existing_session
+        else:
+            async with AsyncSessionLocal() as s:
+                yield s
+
     async def process_lead_after_debounce(self, account_id_str: str, lead_id_str: str):
         """
         Фоновая обработка накопленных сообщений лида:
         1. Захват LEAD_BUSY мьютекса
-        2. Проверка статуса аккаунта и лида
-        3. Генерация ответа ИИ через LLMCommunicator
-        4. Запись в поле сделки amoCRM (PATCH)
-        5. Запуск Salesbot (POST /api/v4/bots/{id}/run)
-        6. Экстракция полей через LLMExtractor под тем же локом
+        2. Проверка статуса аккаунта и лида (короткая сессия БД)
+        3. Генерация ответа ИИ через LLMCommunicator (БЕЗ сессии БД)
+        4. Запись в поле сделки amoCRM (PATCH, БЕЗ сессии БД)
+        5. Запуск Salesbot (POST /api/v4/bots/{id}/run, БЕЗ сессии БД)
+        6. Экстракция полей через LLMExtractor под тем же локом (БЕЗ сессии БД)
         7. Освобождение мьютекса
         """
         lock_acquired = await debounce_service.acquire_lead_lock(account_id_str, lead_id_str)
@@ -106,84 +121,88 @@ class DeliveryService:
         account_id_str: str,
         lead_id_str: str
     ):
+        # 1. Короткая сессия БД для чтения конфигурации аккаунта (соединение возвращается в пул до сетевых вызовов)
         async with AsyncSessionLocal() as session:
-                # Загружаем аккаунт со всеми связанными сущностями
-                stmt = (
-                    select(Account)
-                    .options(
-                        selectinload(Account.ai_config),
-                        selectinload(Account.field_mappings),
-                        selectinload(Account.pipelines),
-                    )
-                    .where(Account.id == account_uuid)
+            stmt = (
+                select(Account)
+                .options(
+                    selectinload(Account.ai_config),
+                    selectinload(Account.field_mappings),
+                    selectinload(Account.pipelines),
                 )
-                account = (await session.execute(stmt)).scalar_one_or_none()
+                .where(Account.id == account_uuid)
+            )
+            account = (await session.execute(stmt)).scalar_one_or_none()
 
-                if not account:
-                    logger.error(f"Аккаунт {account_id_str} не найден в БД.")
-                    return
+            if not account:
+                logger.error(f"Аккаунт {account_id_str} не найден в БД.")
+                return
 
-                if not account.is_active:
-                    logger.info(f"Аккаунт {account_id_str} остановлен пользователем (is_active=False). Пропуск.")
-                    return
+            if not account.is_active:
+                logger.info(f"Аккаунт {account_id_str} остановлен пользователем (is_active=False). Пропуск.")
+                return
 
-                if account.status == AccountStatus.ERROR:
-                    logger.warning(f"Аккаунт {account_id_str} в статусе ERROR. Пропуск.")
-                    return
+            if account.status == AccountStatus.ERROR:
+                logger.warning(f"Аккаунт {account_id_str} в статусе ERROR. Пропуск.")
+                return
 
-                if not account.bot_id or not account.ai_reply_field_id:
-                    logger.warning(f"Аккаунт {account_id_str} не сконфигурирован: bot_id={account.bot_id}, field_id={account.ai_reply_field_id}")
-                    return
+            if not account.bot_id or not account.ai_reply_field_id:
+                logger.warning(f"Аккаунт {account_id_str} не сконфигурирован: bot_id={account.bot_id}, field_id={account.ai_reply_field_id}")
+                return
 
-                try:
-                    access_token = decrypt_token(account.encrypted_token)
-                except Exception as e:
-                    logger.error(f"Не удалось расшифровать токен аккаунта {account_id_str}: {e}")
-                    return
+            try:
+                access_token = decrypt_token(account.encrypted_token)
+            except Exception as e:
+                logger.error(f"Не удалось расшифровать токен аккаунта {account_id_str}: {e}")
+                return
 
-                subdomain = account.subdomain
+            subdomain = account.subdomain
 
-                # Извлекаем все сообщения из буфера дебаунса
-                buffered_data = await debounce_service.pop_buffered_messages(account_id_str, lead_id_str)
-                if not buffered_data:
-                    logger.info(f"Буфер сообщений для лида {lead_id_str} пуст.")
-                    return
+        # 2. Извлекаем сообщения из Redis-буфера (вне сессии БД)
+        buffered_data = await debounce_service.pop_buffered_messages(account_id_str, lead_id_str)
+        if not buffered_data:
+            logger.info(f"Буфер сообщений для лида {lead_id_str} пуст.")
+            return
 
-                if isinstance(buffered_data, dict):
-                    buffered_texts = buffered_data.get("texts", [])
-                    buffered_attachments = buffered_data.get("attachments", [])
-                else:
-                    buffered_texts = buffered_data or []
-                    buffered_attachments = []
+        is_comment = False
+        if isinstance(buffered_data, dict):
+            buffered_texts = buffered_data.get("texts", [])
+            buffered_attachments = buffered_data.get("attachments", [])
+            is_comment = bool(buffered_data.get("is_comment", False))
+        else:
+            buffered_texts = buffered_data or []
+            buffered_attachments = []
 
-                if not buffered_texts and not buffered_attachments:
-                    return
+        if not buffered_texts and not buffered_attachments:
+            return
 
-                try:
-                    await self._execute_lead_pipeline(
-                        session=session,
-                        account=account,
-                        account_uuid=account_uuid,
-                        amo_lead_id=amo_lead_id,
-                        account_id_str=account_id_str,
-                        lead_id_str=lead_id_str,
-                        access_token=access_token,
-                        subdomain=subdomain,
-                        buffered_texts=buffered_texts,
-                        buffered_attachments=buffered_attachments
-                    )
-                except BaseException as pipe_err:
-                    logger.warning(
-                        f"Сбой в пайплайне лида {lead_id_str} ({type(pipe_err).__name__}). "
-                        f"Восстановление сообщений в буфер Redis (CRITICAL-01)..."
-                    )
-                    try:
-                        await asyncio.shield(
-                            debounce_service.restore_buffered_messages(account_id_str, lead_id_str, buffered_data)
-                        )
-                    except Exception as res_err:
-                        logger.error(f"Не удалось восстановить буфер для {account_id_str}:{lead_id_str}: {res_err}")
-                    raise
+        # 3. Запуск пайплайна без удержания глобальной сессии БД
+        try:
+            await self._execute_lead_pipeline(
+                session=None,
+                account=account,
+                account_uuid=account_uuid,
+                amo_lead_id=amo_lead_id,
+                account_id_str=account_id_str,
+                lead_id_str=lead_id_str,
+                access_token=access_token,
+                subdomain=subdomain,
+                buffered_texts=buffered_texts,
+                buffered_attachments=buffered_attachments,
+                is_comment=is_comment
+            )
+        except BaseException as pipe_err:
+            logger.warning(
+                f"Сбой в пайплайне лида {lead_id_str} ({type(pipe_err).__name__}). "
+                f"Восстановление сообщений в буфер Redis (CRITICAL-01)..."
+            )
+            try:
+                await asyncio.shield(
+                    debounce_service.restore_buffered_messages(account_id_str, lead_id_str, buffered_data)
+                )
+            except Exception as res_err:
+                logger.error(f"Не удалось восстановить буфер для {account_id_str}:{lead_id_str}: {res_err}")
+            raise
 
     async def _execute_lead_pipeline(
         self,
@@ -196,9 +215,10 @@ class DeliveryService:
         access_token: str,
         subdomain: str,
         buffered_texts: List[str],
-        buffered_attachments: List[Dict[str, Any]]
+        buffered_attachments: List[Dict[str, Any]],
+        is_comment: bool = False
     ):
-        # Скачиваем медиавложения (если есть)
+        # 1. Внешний HTTP-вызов: Скачиваем медиавложения (БЕЗ удержания сессии БД)
         media_parts: List[Dict[str, Any]] = []
         if buffered_attachments:
             for att in buffered_attachments:
@@ -226,27 +246,9 @@ class DeliveryService:
         elif not combined_user_text:
             return
 
-        # Загружаем или создаем сделку
-        lead_stmt = select(Lead).where(
-            Lead.account_id == account_uuid,
-            Lead.amo_lead_id == amo_lead_id
-        )
-        lead = (await session.execute(lead_stmt)).scalar_one_or_none()
-
-        if not lead:
-            lead = Lead(
-                account_id=account_uuid,
-                amo_lead_id=amo_lead_id,
-                stuck_count=0,
-                handover_required=False,
-                last_message_at=datetime.now(timezone.utc)
-            )
-            session.add(lead)
-            await session.flush()
-
-        # Получаем актуальные данные сделки из amoCRM только при необходимости (IMPORTANT-15)
-        enabled_pipeline_ids = [p.amo_pipeline_id for p in account.pipelines if p.is_enabled]
-        has_enabled_mappings = any(fm.is_enabled for fm in account.field_mappings)
+        # 2. Внешний HTTP-вызов: Получаем актуальные данные сделки и контакта из amoCRM (БЕЗ сессии БД)
+        enabled_pipeline_ids = [p.amo_pipeline_id for p in (account.pipelines or []) if p.is_enabled]
+        has_enabled_mappings = any(fm.is_enabled for fm in (account.field_mappings or []))
 
         lead_amo_data = None
         contact_id = None
@@ -254,7 +256,6 @@ class DeliveryService:
         if enabled_pipeline_ids or has_enabled_mappings:
             lead_amo_data = await amocrm_client.get_lead(subdomain, access_token, amo_lead_id)
 
-            # Получаем связанный контакт для доступа к его полям
             if lead_amo_data:
                 contact_id = (
                     lead_amo_data.get("contact_id")
@@ -283,38 +284,57 @@ class DeliveryService:
                 )
                 return
 
-        # Если сделка уже переведена на оператора, ИИ не отвечает
-        if lead.handover_required:
-            logger.info(f"Лид {amo_lead_id} уже переведен на оператора (handover_required=True). Пропуск ответа ИИ.")
-            return
+        # 3. Короткая сессия БД №1: Чтение/создание лида, запись сообщения пользователя и чтение истории
+        async with self._session_scope(session) as db:
+            lead_stmt = select(Lead).where(
+                Lead.account_id == account_uuid,
+                Lead.amo_lead_id == amo_lead_id
+            )
+            lead = (await db.execute(lead_stmt)).scalar_one_or_none()
 
-        # Сохраняем сообщение пользователя
-        user_msg = ConversationMessage(
-            lead_id=lead.id,
-            role="user",
-            content=combined_user_text,
-            created_at=datetime.now(timezone.utc)
-        )
-        session.add(user_msg)
-        lead.last_message_at = datetime.now(timezone.utc)
-        await session.commit()
+            if not lead:
+                lead = Lead(
+                    account_id=account_uuid,
+                    amo_lead_id=amo_lead_id,
+                    stuck_count=0,
+                    handover_required=False,
+                    last_message_at=datetime.now(timezone.utc)
+                )
+                db.add(lead)
+                await db.flush()
 
-        # Загружаем историю переписки (до 20 последних реплик)
-        history_stmt = (
-            select(ConversationMessage)
-            .where(ConversationMessage.lead_id == lead.id)
-            .order_by(ConversationMessage.created_at.desc())
-            .limit(20)
-        )
-        db_messages = list((await session.execute(history_stmt)).scalars().all())
-        recent_messages = list(reversed(db_messages))
-        history_payload = [{"role": m.role, "content": m.content} for m in recent_messages]
+            if lead.handover_required:
+                logger.info(f"Лид {amo_lead_id} уже переведен на оператора (handover_required=True). Пропуск ответа ИИ.")
+                return
 
-        # -------------------------------------------------------------
-        # Подготовка целевых полей (FieldMapping) и уже заполненных данных сделки
-        # -------------------------------------------------------------
+            lead_db_id = lead.id
+            current_stuck_count = lead.stuck_count or 0
+
+            user_msg = ConversationMessage(
+                lead_id=lead_db_id,
+                role="user",
+                content=combined_user_text,
+                created_at=datetime.now(timezone.utc)
+            )
+            db.add(user_msg)
+            await db.flush()
+            user_msg_id = user_msg.id
+            lead.last_message_at = datetime.now(timezone.utc)
+            await db.commit()
+
+            history_stmt = (
+                select(ConversationMessage)
+                .where(ConversationMessage.lead_id == lead_db_id)
+                .order_by(ConversationMessage.created_at.desc())
+                .limit(20)
+            )
+            all_m = (await db.execute(history_stmt)).scalars().all()
+            db_messages = list(all_m) if isinstance(all_m, (list, tuple)) else []
+            recent_messages = list(reversed(db_messages))
+            history_payload = [{"role": m.role, "content": m.content} for m in recent_messages]
+
+        # 4. Подготовка целевых полей (FieldMapping) в памяти (БЕЗ сессии БД)
         amo_cf_values: Dict[int, str] = {}
-        # Сначала поля контакта (приоритет у полей сделки, они перезапишут)
         if contact_amo_data:
             for cf in (contact_amo_data.get("custom_fields_values") or []):
                 fid = cf.get("field_id")
@@ -323,7 +343,6 @@ class DeliveryService:
                     val_str = str(vals[0].get("value") or "").strip()
                     if val_str:
                         amo_cf_values[fid] = val_str
-        # Поля сделки перезаписывают поля контакта при совпадении ID
         if lead_amo_data:
             for cf in (lead_amo_data.get("custom_fields_values") or []):
                 fid = cf.get("field_id")
@@ -349,9 +368,18 @@ class DeliveryService:
                     "hint": fm.ai_hint or f"Выяснить {fm.field_name}"
                 })
 
-        # Параметры ИИ
+        is_comment_lead = is_comment
+        if not is_comment_lead and lead_amo_data:
+            lead_tags = [t.get("name", "").lower() for t in ((lead_amo_data.get("_embedded") or {}).get("tags") or [])]
+            if any("comment" in t or "коммент" in t for t in lead_tags):
+                is_comment_lead = True
+
         ai_config = account.ai_config
         prompt = ai_config.communicator_prompt if ai_config else "Ты вежливый ИИ-менеджер."
+        if is_comment_lead and ai_config and ai_config.comment_prompt:
+            prompt = ai_config.comment_prompt
+        direct_link = ai_config.direct_link if ai_config else None
+
         comm_model = ai_config.communicator_model if ai_config else "gemini-3.1-flash-lite"
         fallback_comm_model = ai_config.fallback_communicator_model if ai_config and ai_config.fallback_communicator_model else "gemini-2.5-flash"
         temperature = float(ai_config.temperature) if ai_config else 0.4
@@ -360,9 +388,7 @@ class DeliveryService:
         knowledge_mode = ai_config.knowledge_mode if ai_config else "plain_text"
         gemini_cache_name = ai_config.gemini_cache_name if ai_config else None
 
-        # -------------------------------------------------------------
-        # 1. КРИТИЧЕСКИЙ ПУТЬ: Генерация ответа и отправка в мессенджер
-        # -------------------------------------------------------------
+        # 5. Внешний HTTP-вызов: Генерация ответа в Gemini (БЕЗ сессии БД!)
         comm_resp = await communicator.generate_reply(
             system_prompt=prompt,
             messages=history_payload,
@@ -374,29 +400,35 @@ class DeliveryService:
             known_fields=known_fields,
             knowledge_base=knowledge_base,
             knowledge_mode=knowledge_mode,
-            gemini_cache_name=gemini_cache_name
+            gemini_cache_name=gemini_cache_name,
+            is_comment=is_comment_lead,
+            direct_link=direct_link
         )
 
-        # Если Gemini распознал медиафайл и вернул выжимку/транскрипцию, обогащаем запись в БД
         if comm_resp.media_summary:
-            if combined_user_text == "[Входящее медиасообщение]":
-                user_msg.content = comm_resp.media_summary
-            else:
-                user_msg.content = f"{comm_resp.media_summary}\n{combined_user_text}"
-            await session.commit()
+            async with self._session_scope(session) as db:
+                msg_obj = (await db.execute(select(ConversationMessage).where(ConversationMessage.id == user_msg_id))).scalar_one_or_none()
+                if msg_obj:
+                    if combined_user_text == "[Входящее медиасообщение]":
+                        msg_obj.content = comm_resp.media_summary
+                    else:
+                        msg_obj.content = f"{comm_resp.media_summary}\n{combined_user_text}"
+                    await db.commit()
 
-        # Проверка условий Handover (явный запрос клиента или лимит застревания)
-        is_stuck_threshold = lead.stuck_count >= handover_limit
+        # Проверка условий Handover
+        is_stuck_threshold = current_stuck_count >= handover_limit
         if comm_resp.is_handover_requested or is_stuck_threshold:
-            logger.info(f"Инициирован Handover для лида {amo_lead_id} (запрос={comm_resp.is_handover_requested}, stuck={lead.stuck_count})")
-            lead.handover_required = True
-            await session.commit()
+            logger.info(f"Инициирован Handover для лида {amo_lead_id} (запрос={comm_resp.is_handover_requested}, stuck={current_stuck_count})")
+            async with self._session_scope(session) as db:
+                lead_obj = (await db.execute(select(Lead).where(Lead.id == lead_db_id))).scalar_one_or_none()
+                if lead_obj:
+                    lead_obj.handover_required = True
+                    await db.commit()
 
-            # Создаем задачу оператору
             task_text = (
                 "Клиент запросил оператора в чате."
                 if comm_resp.is_handover_requested
-                else f"ИИ не может решить вопрос клиента после {lead.stuck_count} попыток. Подключитесь к диалогу."
+                else f"ИИ не может решить вопрос клиента после {current_stuck_count} попыток. Подключитесь к диалогу."
             )
             await amocrm_client.create_operator_task(
                 subdomain=subdomain,
@@ -405,7 +437,6 @@ class DeliveryService:
                 text=task_text
             )
 
-            # Уведомляем клиента вежливым сообщением
             handover_notice = "Переключаю вас на менеджера. Специалист скоро подключится к диалогу!"
             reply_field_id = account.ai_reply_field_id
             if not reply_field_id:
@@ -425,20 +456,20 @@ class DeliveryService:
                     bot_id=account.bot_id,
                     entity_id=amo_lead_id
                 )
-                asst_msg = ConversationMessage(
-                    lead_id=lead.id,
-                    role="assistant",
-                    content=handover_notice,
-                    created_at=datetime.now(timezone.utc)
-                )
-                session.add(asst_msg)
-                await session.commit()
+                async with self._session_scope(session) as db:
+                    asst_msg = ConversationMessage(
+                        lead_id=lead_db_id,
+                        role="assistant",
+                        content=handover_notice,
+                        created_at=datetime.now(timezone.utc)
+                    )
+                    db.add(asst_msg)
+                    await db.commit()
             return
 
         reply_text = comm_resp.text
 
-        # Строгая последовательность:
-        # 1) Запись в поле сделки (основное поле ответа ИИ)
+        # 6. Внешние HTTP-вызовы: Запись в поле сделки и запуск Salesbot (БЕЗ сессии БД)
         reply_field_id = account.ai_reply_field_id
         patch_ok = False
         if reply_field_id:
@@ -450,7 +481,6 @@ class DeliveryService:
                 fields=patch_items
             )
 
-        # Авто-восстановление поля ответа, если оно удалено или отсутствует в amoCRM
         if not patch_ok:
             logger.warning(
                 f"Не удалось записать ответ ИИ в поле {reply_field_id} лида {amo_lead_id}. "
@@ -460,7 +490,12 @@ class DeliveryService:
             if new_field_id:
                 account.ai_reply_field_id = new_field_id
                 reply_field_id = new_field_id
-                await session.commit()
+                async with self._session_scope(session) as db:
+                    acc_obj = (await db.execute(select(Account).where(Account.id == account_uuid))).scalar_one_or_none()
+                    if acc_obj:
+                        acc_obj.ai_reply_field_id = new_field_id
+                    await db.commit()
+
                 patch_items = [{"field_id": new_field_id, "values": [{"value": reply_text}]}]
                 patch_ok = await amocrm_client.patch_lead_custom_fields(
                     subdomain=subdomain,
@@ -481,7 +516,6 @@ class DeliveryService:
             )
             return
 
-        # 2) Запуск Salesbot (прочитает поле {{lead.cf.<id>}} и отправит в чат)
         bot_ok = await amocrm_client.run_salesbot(
             subdomain=subdomain,
             access_token=access_token,
@@ -492,22 +526,21 @@ class DeliveryService:
         if not bot_ok:
             logger.warning(f"Salesbot {account.bot_id} вернул ошибку при запуске для лида {amo_lead_id}")
 
-        # Сохраняем ответ ассистента в БД
-        asst_msg = ConversationMessage(
-            lead_id=lead.id,
-            role="assistant",
-            content=reply_text,
-            created_at=datetime.now(timezone.utc)
-        )
-        session.add(asst_msg)
-        await session.commit()
+        # 7. Короткая сессия БД №2: Сохраняем ответ ассистента
+        async with self._session_scope(session) as db:
+            asst_msg = ConversationMessage(
+                lead_id=lead_db_id,
+                role="assistant",
+                content=reply_text,
+                created_at=datetime.now(timezone.utc)
+            )
+            db.add(asst_msg)
+            await db.commit()
 
         logger.info(f"Успешная доставка ответа ИИ лиду {amo_lead_id}: '{reply_text[:60]}...'")
 
-        # -------------------------------------------------------------
-        # 2. ЭКСТРАКТОР: Выполняется сразу следом, ПОКА ЕЩЕ АКТИВЕН ЛОК
-        # -------------------------------------------------------------
-        enabled_mappings = [fm for fm in account.field_mappings if fm.is_enabled]
+        # 8. ЭКСТРАКТОР: Внешние HTTP-вызовы Gemini и amoCRM (БЕЗ сессии БД)
+        enabled_mappings = [fm for fm in (account.field_mappings or []) if fm.is_enabled]
         if enabled_mappings:
             full_dialog = history_payload + [{"role": "assistant", "content": reply_text}]
             ext_model = ai_config.extractor_model if ai_config else "gemini-3.1-flash-lite"
@@ -521,10 +554,10 @@ class DeliveryService:
                 media_parts=media_parts
             )
 
+            disabled_field_ids = set()
             if ext_result.fields_to_update:
                 logger.info(f"Экстрактор нашел поля для лида {amo_lead_id}: {ext_result.field_name_values}")
 
-                # Разделяем поля по типу сущности: сделка vs контакт
                 fm_entity_map = {fm.amo_field_id: getattr(fm, "entity_type", "lead") for fm in account.field_mappings}
                 lead_fields_to_update = []
                 contact_fields_to_update = []
@@ -535,7 +568,6 @@ class DeliveryService:
                     else:
                         lead_fields_to_update.append(item)
 
-                # Записываем поля сделки
                 if lead_fields_to_update:
                     ext_patch_ok = await amocrm_client.patch_lead_custom_fields(
                         subdomain=subdomain,
@@ -558,12 +590,11 @@ class DeliveryService:
                             )
                             if not single_ok:
                                 logger.error(f"Поле #{fid} отклонено amoCRM (вероятно, удалено). Автоматически отключаем маппинг.")
+                                disabled_field_ids.add(fid)
                                 for fm in account.field_mappings:
                                     if fm.amo_field_id == fid:
                                         fm.is_enabled = False
-                        await session.commit()
 
-                # Записываем поля контакта
                 target_contact_id = contact_id or (contact_amo_data.get("id") if contact_amo_data else None)
                 if contact_fields_to_update:
                     if target_contact_id:
@@ -588,27 +619,46 @@ class DeliveryService:
                                 )
                                 if not single_ok:
                                     logger.error(f"Поле контакта #{fid} отклонено amoCRM. Отключаем маппинг.")
+                                    disabled_field_ids.add(fid)
                                     for fm in account.field_mappings:
                                         if fm.amo_field_id == fid:
                                             fm.is_enabled = False
-                            await session.commit()
                     else:
                         logger.warning(f"Нет contact_id для записи полей контакта в лиде #{amo_lead_id}.")
 
-                # Логируем экстракцию
-                ext_log = ExtractionLog(
-                    lead_id=lead.id,
-                    raw_response=ext_result.raw_response,
-                    applied_fields=ext_result.field_name_values,
-                    created_at=datetime.now(timezone.utc)
-                )
-                session.add(ext_log)
-                lead.stuck_count = 0
-                await session.commit()
+                # 9. Короткая сессия БД №3: Сохранение логов экстрактора и отключение удаленных полей
+                async with self._session_scope(session) as db:
+                    if disabled_field_ids:
+                        fms = (await db.execute(
+                            select(FieldMapping).where(
+                                FieldMapping.account_id == account_uuid,
+                                FieldMapping.amo_field_id.in_(list(disabled_field_ids))
+                            )
+                        )).scalars().all()
+                        if isinstance(fms, (list, tuple)):
+                            for f_obj in fms:
+                                f_obj.is_enabled = False
+
+                    ext_log = ExtractionLog(
+                        lead_id=lead_db_id,
+                        raw_response=ext_result.raw_response,
+                        applied_fields=ext_result.field_name_values,
+                        created_at=datetime.now(timezone.utc)
+                    )
+                    db.add(ext_log)
+
+                    lead_obj = (await db.execute(select(Lead).where(Lead.id == lead_db_id))).scalar_one_or_none()
+                    if lead_obj:
+                        lead_obj.stuck_count = 0
+                    lead.stuck_count = 0
+                    await db.commit()
             else:
-                # Если данные не удалось извлечь и клиент пишет короткие/непонятные фразы (IMPORTANT-17)
-                lead.stuck_count += 1
-                await session.commit()
+                async with self._session_scope(session) as db:
+                    lead_obj = (await db.execute(select(Lead).where(Lead.id == lead_db_id))).scalar_one_or_none()
+                    if lead_obj:
+                        lead_obj.stuck_count = (lead_obj.stuck_count or 0) + 1
+                    lead.stuck_count = current_stuck_count + 1
+                    await db.commit()
 
 
 delivery_service = DeliveryService()

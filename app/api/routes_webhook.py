@@ -76,13 +76,22 @@ def extract_webhook_message(body_bytes: bytes, content_type: str) -> Optional[Di
                     raw_text = str(msg.get("text", "") or "")
                     formatted_text = _format_message_text(raw_text, attachment)
 
+                    origin_str = str(
+                        msg.get("origin") or
+                        msg.get("source") or
+                        msg.get("chat_type") or
+                        ""
+                    ).lower()
+                    is_comment = "comment" in origin_str
+
                     return {
                         "id": str(msg.get("id", "")),
                         "entity_id": str(msg.get("entity_id") or msg.get("lead_id") or ""),
                         "author_type": msg.get("author", {}).get("type", ""),
                         "text": formatted_text,
                         "attachment": attachment,
-                        "created_at": float(msg.get("created_at") or time.time())
+                        "created_at": float(msg.get("created_at") or time.time()),
+                        "is_comment": is_comment
                     }
         except Exception as e:
             logger.debug(f"Не удалось распарсить вебхук как JSON: {e}")
@@ -133,6 +142,14 @@ def extract_webhook_message(body_bytes: bytes, content_type: str) -> Optional[Di
                     "file_name": str(att_name)
                 }
 
+            origin_raw = (
+                parsed.get("message[add][0][origin]") or
+                parsed.get("message[add][0][source]") or
+                parsed.get("message[add][0][chat_type]") or
+                [""]
+            )[0].lower()
+            is_comment = "comment" in origin_raw
+
             formatted_text = _format_message_text(raw_text, attachment)
 
             return {
@@ -141,7 +158,8 @@ def extract_webhook_message(body_bytes: bytes, content_type: str) -> Optional[Di
                 "author_type": str(author_type),
                 "text": formatted_text,
                 "attachment": attachment,
-                "created_at": float(created_at_raw)
+                "created_at": float(created_at_raw),
+                "is_comment": is_comment
             }
     except Exception as e:
         logger.error(f"Ошибка парсинга form-urlencoded вебхука: {e}")
@@ -191,12 +209,21 @@ async def handle_amocrm_webhook(
     Гарантированный быстрый ответ 200 OK (<100мс).
     """
     # Rate limit: не более 120 запросов в минуту на аккаунт (защита от DoS и спама)
+    # Атомарная пара INCR + EXPIRE через pipeline во избежание бессрочной блокировки ключа
     r_redis = await debounce_service.get_redis()
     rl_key = f"rate_limit:webhook:{account_uuid}"
-    req_count = await r_redis.incr(rl_key)
-    if req_count == 1:
+    try:
+        async with r_redis.pipeline(transaction=True) as pipe:
+            pipe.incr(rl_key)
+            pipe.expire(rl_key, 60)
+            res = await pipe.execute()
+        req_count = res[0]
+    except Exception:
+        # Fallback на случай отсутствия поддержки pipeline в тестовых моках
+        req_count = await r_redis.incr(rl_key)
         await r_redis.expire(rl_key, 60)
-    elif req_count > 120:
+
+    if req_count > 120:
         logger.warning(f"Превышен лимит вебхуков для аккаунта {account_uuid} ({req_count}/мин). Запрос отклонён.")
         return {"status": "ignored", "reason": "rate_limited"}
 
@@ -243,7 +270,8 @@ async def handle_amocrm_webhook(
         str(account_uuid),
         lead_id,
         msg["text"],
-        attachment=msg.get("attachment")
+        attachment=msg.get("attachment"),
+        is_comment=msg.get("is_comment", False)
     )
 
     # Запустить таймер дебаунса (2.5 сек)

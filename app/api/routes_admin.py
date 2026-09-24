@@ -496,6 +496,29 @@ ADMIN_HTML = """<!DOCTYPE html>
           </div>
         </div>
 
+        <!-- Секция: Публичные комментарии в соцсетях и Direct -->
+        <div class="p-3.5 bg-slate-800/80 border border-slate-700 rounded-xl space-y-3">
+          <div class="flex items-center justify-between">
+            <label class="text-xs font-semibold text-sky-300 flex items-center gap-1.5">
+              <i class="fa-solid fa-comments text-sky-400"></i> Автоответы на комментарии и перевод в Direct
+            </label>
+          </div>
+
+          <div>
+            <label class="block text-[11px] font-medium text-slate-300 mb-1">Ссылка на Direct компании (Instagram / Telegram / др.):</label>
+            <input type="text" x-model="aiConfig.direct_link" placeholder="https://ig.me/m/marketingmarkaziuz"
+                   class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white outline-none focus:border-indigo-500 font-mono">
+            <div class="text-[10px] text-slate-400 mt-0.5">ИИ будет прикреплять эту ссылку в ответ на комментарии, чтобы клиент в 1 клик переходил в личные сообщения.</div>
+          </div>
+
+          <div class="space-y-1">
+            <label class="block text-[11px] font-medium text-slate-300">Промпт для комментариев под постами (на узбекском / русском):</label>
+            <textarea x-model="aiConfig.comment_prompt" rows="7"
+                      class="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs text-slate-200 outline-none focus:border-indigo-500 font-mono"></textarea>
+            <div class="text-[10px] text-slate-400">Когда сообщение приходит из комментария под постом, ИИ использует эту готовую инструкцию. Вы можете свободно редактировать правила и фразы под себя.</div>
+          </div>
+        </div>
+
         <div class="grid grid-cols-2 gap-3">
           <div>
             <label class="block text-xs font-medium text-slate-300 mb-1">Модель Общителя (Основная)</label>
@@ -539,6 +562,16 @@ ADMIN_HTML = """<!DOCTYPE html>
   </div>
 
   <script>
+    const DEFAULT_COMMENT_PROMPT_TEXT = `Ты — вежливый и дружелюбный ИИ-менеджер. Твоя задача — отвечать на комментарии клиентов под постами и Reels в соцсетях.
+
+ПРАВИЛА ОТВЕТА:
+1. Отвечай строго на том языке, на котором написал клиент (узбекский или русский).
+2. Если клиент прислал '+', '++', огонёк '🔥', смайлик или вопрос о цене/наличии:
+   - На узбекском: «Assalomu alaykum! Qiziqishingiz uchun rahmat. Narxlar va batafsil ma'lumotni Direct-ga yubordik 👉 {direct_link} (yoki shaxsiy xabarlaringizni tekshiring 📩)»
+   - На русском: «Здравствуйте! Спасибо за интерес! Отправили подробности и цены вам в Direct 👉 {direct_link} (или проверьте личные сообщения 📩)»
+3. Если клиент задал конкретный вопрос по товару или услуге — ответь на вопрос кратко (1-2 предложения) по базе знаний и обязательно предложи продолжить в Direct: {direct_link}.
+4. Твой ответ публичный, поэтому держи его кратким, дружелюбным и без длинных списков вопросов.`;
+
     function adminApp() {
       return {
         accounts: [],
@@ -563,7 +596,9 @@ ADMIN_HTML = """<!DOCTYPE html>
           temperature: 0.4,
           handover_after_stuck: 4,
           knowledge_base: '',
-          knowledge_mode: 'plain_text'
+          knowledge_mode: 'plain_text',
+          comment_prompt: DEFAULT_COMMENT_PROMPT_TEXT,
+          direct_link: ''
         },
         form: {
           subdomain: '',
@@ -607,13 +642,38 @@ ADMIN_HTML = """<!DOCTYPE html>
           };
           return map[st] || st;
         },
+        async apiFetch(url, options = {}) {
+          const headers = { ...(options.headers || {}) };
+          if (this.adminKey) {
+            headers['X-Admin-Key'] = this.adminKey;
+          }
+          const res = await fetch(url, { ...options, headers });
+          if (res.status === 401 || res.status === 403) {
+            this.showAuthModal = true;
+          }
+          return res;
+        },
+        async submitAdminKey() {
+          this.adminKey = this.adminKeyInput.trim();
+          localStorage.setItem('ai_admin_key', this.adminKey);
+          document.cookie = `admin_key=${encodeURIComponent(this.adminKey)}; path=/; max-age=2592000; SameSite=Lax`;
+          this.showAuthModal = false;
+          await this.fetchAccounts();
+        },
+        logoutAdmin() {
+          this.adminKeyInput = this.adminKey;
+          this.showAuthModal = true;
+        },
         async init() {
+          if (!this.adminKey) {
+            this.showAuthModal = true;
+          }
           await this.fetchAccounts();
         },
         async fetchAccounts() {
           this.loading = true;
           try {
-            const res = await fetch('/accounts');
+            const res = await this.apiFetch('/accounts');
             this.accounts = await res.json();
           } catch (e) {
             this.showToast('Ошибка загрузки аккаунтов', 'error');
@@ -623,7 +683,7 @@ ADMIN_HTML = """<!DOCTYPE html>
         },
         async toggleAccountActive(acc) {
           try {
-            const res = await fetch(`/accounts/${acc.id}/toggle-active`, {
+            const res = await this.apiFetch(`/accounts/${acc.id}/toggle-active`, {
               method: 'POST'
             });
             const data = await res.json();
@@ -647,7 +707,7 @@ ADMIN_HTML = """<!DOCTYPE html>
           }
           this.submitting = true;
           try {
-            const res = await fetch('/accounts', {
+            const res = await this.apiFetch('/accounts', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(this.form)
@@ -684,7 +744,7 @@ ADMIN_HTML = """<!DOCTYPE html>
           if (!this.selectedAccount) return;
           this.syncing = true;
           try {
-            const res = await fetch(`/accounts/${this.selectedAccount.id}/sync`, {
+            const res = await this.apiFetch(`/accounts/${this.selectedAccount.id}/sync`, {
               method: 'POST'
             });
             const data = await res.json();
@@ -711,7 +771,7 @@ ADMIN_HTML = """<!DOCTYPE html>
         async loadBots() {
           if (!this.selectedAccount) return;
           try {
-            const res = await fetch(`/accounts/${this.selectedAccount.id}/bots`);
+            const res = await this.apiFetch(`/accounts/${this.selectedAccount.id}/bots`);
             this.availableBots = await res.json();
           } catch (e) {
             this.showToast('Ошибка получения ботов', 'error');
@@ -720,7 +780,7 @@ ADMIN_HTML = """<!DOCTYPE html>
         async saveBotLink() {
           try {
             const newBotId = parseInt(this.selectedBotId);
-            const res = await fetch(`/accounts/${this.selectedAccount.id}/link-bot`, {
+            const res = await this.apiFetch(`/accounts/${this.selectedAccount.id}/link-bot`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ bot_id: newBotId })
@@ -739,7 +799,7 @@ ADMIN_HTML = """<!DOCTYPE html>
         async testBot(accId) {
           this.showToast('Отправка проверочного запроса в amoCRM...');
           try {
-            const res = await fetch(`/accounts/${accId}/test-connection`, {
+            const res = await this.apiFetch(`/accounts/${accId}/test-connection`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({})
@@ -758,14 +818,14 @@ ADMIN_HTML = """<!DOCTYPE html>
         },
         async loadPipelines() {
           try {
-            const res = await fetch(`/accounts/${this.selectedAccount.id}/pipelines`);
+            const res = await this.apiFetch(`/accounts/${this.selectedAccount.id}/pipelines`);
             this.pipelines = await res.json();
           } catch (e) {}
         },
         async savePipelines() {
           try {
             const enabledIds = this.pipelines.filter(p => p.is_enabled).map(p => p.amo_pipeline_id);
-            const res = await fetch(`/accounts/${this.selectedAccount.id}/pipelines`, {
+            const res = await this.apiFetch(`/accounts/${this.selectedAccount.id}/pipelines`, {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ enabled_amo_pipeline_ids: enabledIds })
@@ -779,7 +839,7 @@ ADMIN_HTML = """<!DOCTYPE html>
         },
         async loadFields() {
           try {
-            const res = await fetch(`/accounts/${this.selectedAccount.id}/fields`);
+            const res = await this.apiFetch(`/accounts/${this.selectedAccount.id}/fields`);
             this.fields = await res.json();
           } catch (e) {}
         },
@@ -794,7 +854,7 @@ ADMIN_HTML = """<!DOCTYPE html>
                 overwrite_if_filled: f.overwrite_if_filled
               }))
             };
-            const res = await fetch(`/accounts/${this.selectedAccount.id}/fields`, {
+            const res = await this.apiFetch(`/accounts/${this.selectedAccount.id}/fields`, {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(payload)
@@ -811,7 +871,7 @@ ADMIN_HTML = """<!DOCTYPE html>
         async deleteFieldMapping(f) {
           if (!confirm(`Удалить поле «${f.field_name}» из списка панели?`)) return;
           try {
-            const res = await fetch(`/accounts/${this.selectedAccount.id}/fields/${f.amo_field_id}`, {
+            const res = await this.apiFetch(`/accounts/${this.selectedAccount.id}/fields/${f.amo_field_id}`, {
               method: 'DELETE'
             });
             if (res.ok) {
@@ -826,12 +886,14 @@ ADMIN_HTML = """<!DOCTYPE html>
         },
         async loadAIConfig() {
           try {
-            const res = await fetch(`/accounts/${this.selectedAccount.id}/ai-config`);
+            const res = await this.apiFetch(`/accounts/${this.selectedAccount.id}/ai-config`);
             const data = await res.json();
             if (!data.knowledge_mode) data.knowledge_mode = 'plain_text';
             if (!data.knowledge_base) data.knowledge_base = '';
             if (!data.fallback_communicator_model) data.fallback_communicator_model = 'gemini-2.5-flash';
             if (!data.fallback_extractor_model) data.fallback_extractor_model = 'gemini-2.5-flash';
+            if (!data.comment_prompt) data.comment_prompt = DEFAULT_COMMENT_PROMPT_TEXT;
+            if (!data.direct_link) data.direct_link = '';
             this.aiConfig = data;
           } catch (e) {
             console.error('Ошибка загрузки настроек ИИ:', e);
@@ -839,7 +901,7 @@ ADMIN_HTML = """<!DOCTYPE html>
         },
         async saveAIConfig() {
           try {
-            const res = await fetch(`/accounts/${this.selectedAccount.id}/ai-config`, {
+            const res = await this.apiFetch(`/accounts/${this.selectedAccount.id}/ai-config`, {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(this.aiConfig)

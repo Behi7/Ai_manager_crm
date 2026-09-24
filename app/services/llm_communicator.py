@@ -62,6 +62,8 @@ class LLMCommunicator:
         knowledge_base: Optional[str] = None,
         knowledge_mode: str = "plain_text",
         gemini_cache_name: Optional[str] = None,
+        is_comment: bool = False,
+        direct_link: Optional[str] = None,
     ) -> CommunicatorResponse:
         """
         Генерация ответа клиенту на основе истории сообщений, мультимодальных вложений
@@ -121,6 +123,21 @@ class LLMCommunicator:
                 "Веди диалог к следующему целевому действию или отвечай на вопросы клиента."
             )
 
+        # 2.5. Формирование блока для публичных комментариев соцсетей
+        comment_instruction = ""
+        if is_comment:
+            direct_part = f" Обязательно в конце сообщения укажи ссылку на Direct: {direct_link} для перехода в личные сообщения." if direct_link else ""
+            comment_instruction = (
+                "\n\nРЕЖИМ ОТВЕТА НА ПУБЛИЧНЫЙ КОММЕНТАРИЙ СОЦСЕТИ:\n"
+                "Клиент написал комментарий под постом/Reels в соцсети (Instagram, Facebook и т.д.).\n"
+                "1. Отвечай кратко, дружелюбно и по существу (1-2 предложения).\n"
+                "2. Если клиент прислал '+', '++', огонёк 🔥, смайлик или вопрос о цене/товаре — поблагодари за интерес и предложи подробности в Direct.\n"
+                f"3. Пригласи продолжить диалог в Direct.{direct_part}\n"
+                "4. НЕ задавай длинных списков квалификационных вопросов под публичным постом."
+            )
+            # В режиме публичного комментария отключаем анкетную квалификацию
+            qualification_instruction = ""
+
         media_instruction = ""
         if media_parts:
             media_instruction = (
@@ -152,11 +169,16 @@ class LLMCommunicator:
                 "5. ТОЧНОСТЬ: Называй цены и характеристики строго из базы знаний выше. Запрещено выдумывать несуществующие скидки, акции или товары."
             )
 
+        formatted_system_prompt = system_prompt
+        if direct_link:
+            formatted_system_prompt = formatted_system_prompt.replace("{direct_link}", direct_link)
+
         full_system_instruction = (
-            f"{system_prompt}\n"
+            f"{formatted_system_prompt}\n"
             f"{knowledge_instruction}"
             f"{known_info}"
             f"{qualification_instruction}"
+            f"{comment_instruction}"
             f"{media_instruction}\n\n"
             "СТРОЖАЙШИЕ ПРАВИЛА ВЫВОДА:\n"
             "1. Запрещено использовать плейсхолдеры в квадратных скобках вида [цена], [имя], [товар]. "

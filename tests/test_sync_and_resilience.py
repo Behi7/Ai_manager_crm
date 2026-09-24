@@ -207,7 +207,8 @@ class TestSyncAndResilience(unittest.IsolatedAsyncioTestCase):
         res2 = MagicMock()
         res2.scalars.return_value.all.return_value = [fm1, fm2]
 
-        mock_session.execute = AsyncMock(side_effect=[res1, res2])
+        mock_session.execute = AsyncMock(side_effect=[res1, res1, res2])
+        mock_session.add = MagicMock()
         mock_session.commit = AsyncMock()
 
         # amoCRM возвращает только поле 100 (поле 200 удалено)
