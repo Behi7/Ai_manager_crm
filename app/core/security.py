@@ -1,4 +1,5 @@
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
+from fastapi import HTTPException
 from app.core.config import settings
 
 _cipher_suite = Fernet(settings.SECRET_KEY.encode() if isinstance(settings.SECRET_KEY, str) else settings.SECRET_KEY)
@@ -17,5 +18,10 @@ def decrypt_token(encrypted_token: bytes) -> str:
         return ""
     if isinstance(encrypted_token, memoryview):
         encrypted_token = encrypted_token.tobytes()
-    return _cipher_suite.decrypt(encrypted_token).decode("utf-8")
-
+    try:
+        return _cipher_suite.decrypt(encrypted_token).decode("utf-8")
+    except (InvalidToken, ValueError, TypeError):
+        raise HTTPException(
+            status_code=400,
+            detail="Не удалось расшифровать токен amoCRM (ключ шифрования изменен или токен поврежден). Переподключите аккаунт."
+        )

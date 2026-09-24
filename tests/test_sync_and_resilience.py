@@ -290,6 +290,7 @@ class TestSyncAndResilience(unittest.IsolatedAsyncioTestCase):
              patch("app.api.routes_accounts.amocrm_client.ensure_reply_field", return_value=999), \
              patch("app.api.routes_accounts.amocrm_client.list_pipelines", return_value=amo_pipelines), \
              patch("app.api.routes_accounts.amocrm_client.list_custom_fields", return_value=amo_fields), \
+             patch("app.api.routes_accounts.amocrm_client.list_contact_custom_fields", return_value=[]), \
              patch("app.api.routes_accounts.amocrm_client.list_bots", return_value=amo_bots), \
              patch("app.api.routes_accounts.debounce_service.get_redis") as mock_get_redis:
 

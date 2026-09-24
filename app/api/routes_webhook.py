@@ -246,33 +246,40 @@ async def handle_amocrm_webhook(
         logger.info(f"Игнорируем устаревшее сообщение {msg['id']}: возраст {now - msg['created_at']:.1f} сек > 90")
         return {"status": "ignored", "reason": "too_old"}
 
-    # Фильтр 3: Дедупликация в Redis через SETNX (TTL 10 минут)
-    is_duplicate = await debounce_service.is_duplicate_message(str(account_uuid), msg["id"])
-    if is_duplicate:
-        logger.debug(f"Дубликат вебхука для сообщения {msg['id']} отброшен.")
-        return {"status": "duplicate"}
-
     lead_id = msg["entity_id"]
     if not lead_id:
         logger.warning(f"Сообщение {msg['id']} не содержит entity_id (lead_id).")
         return {"status": "ignored", "reason": "missing_entity_id"}
 
-    # Фильтр 3.5: Проверка, активен ли аккаунт (быстрый Redis-кэш)
+    # Фильтр 3: Проверка, активен ли аккаунт (быстрый Redis-кэш), до записи ключа дедупликации
     if await r_redis.exists(f"acc_disabled:{account_uuid}"):
         logger.info(f"Аккаунт {account_uuid} остановлен (Стоп). Вебхук проигнорирован.")
         return {"status": "ignored", "reason": "account_disabled"}
 
+    # Фильтр 3.5: Дедупликация в Redis через SETNX (TTL 10 минут)
+    is_duplicate = await debounce_service.is_duplicate_message(str(account_uuid), msg["id"])
+    if is_duplicate:
+        logger.debug(f"Дубликат вебхука для сообщения {msg['id']} отброшен.")
+        return {"status": "duplicate"}
+
     # Фильтр 4: Авто-верификация аккаунта при первом входящем сообщении
     background_tasks.add_task(_verify_account_if_needed, account_uuid)
 
-    # Фильтр 5: Положить сообщение в буфер дебаунса
-    await debounce_service.add_message_to_buffer(
-        str(account_uuid),
-        lead_id,
-        msg["text"],
-        attachment=msg.get("attachment"),
-        is_comment=msg.get("is_comment", False)
-    )
+    # Фильтр 5: Положить сообщение в буфер дебаунса (с откатом дедупликации при сбое записи в Redis)
+    try:
+        await debounce_service.add_message_to_buffer(
+            str(account_uuid),
+            lead_id,
+            msg["text"],
+            attachment=msg.get("attachment"),
+            is_comment=msg.get("is_comment", False)
+        )
+    except Exception:
+        try:
+            await r_redis.delete(f"msg_dedup:{account_uuid}:{msg['id']}")
+        except Exception:
+            pass
+        raise
 
     # Запустить таймер дебаунса (2.5 сек)
     debounce_service.schedule_debounce(

@@ -147,6 +147,13 @@ async def create_or_connect_account(payload: CreateAccountRequest):
                 account.ai_reply_field_id = field_id
                 account.last_error = None
                 account.is_active = True
+                if account.status == AccountStatus.ERROR:
+                    if account.webhook_verified:
+                        account.status = AccountStatus.VERIFIED
+                    elif account.bot_id:
+                        account.status = AccountStatus.BOT_LINKED
+                    else:
+                        account.status = AccountStatus.FIELD_CREATED
 
             # Создаем AIConfig по умолчанию, если нет
             cfg_stmt = select(AIConfig).where(AIConfig.account_id == account.id)
@@ -160,13 +167,37 @@ async def create_or_connect_account(payload: CreateAccountRequest):
             account_status_val = account.status.value
         except IntegrityError:
             await session.rollback()
-            # Гонка создания аккаунта с одинаковым subdomain
-            acc_stmt = select(Account).where(Account.subdomain == subdomain)
+            # Гонка создания аккаунта с одинаковым subdomain: обновляем реквизиты под блокировкой
+            acc_stmt = select(Account).where(Account.subdomain == subdomain).with_for_update()
             account = (await session.execute(acc_stmt)).scalar_one_or_none()
             if not account:
                 raise HTTPException(status_code=409, detail="Конфликт создания аккаунта: повторите попытку.")
+            account.name = account_name
+            account.amo_account_id = amo_account_id
+            account.encrypted_token = encrypted_token
+            account.ai_reply_field_id = field_id
+            account.last_error = None
+            account.is_active = True
+            if account.status == AccountStatus.ERROR:
+                if account.webhook_verified:
+                    account.status = AccountStatus.VERIFIED
+                elif account.bot_id:
+                    account.status = AccountStatus.BOT_LINKED
+                else:
+                    account.status = AccountStatus.FIELD_CREATED
+            cfg_stmt = select(AIConfig).where(AIConfig.account_id == account.id)
+            ai_cfg = (await session.execute(cfg_stmt)).scalar_one_or_none()
+            if not ai_cfg:
+                session.add(AIConfig(account_id=account.id))
+            await session.commit()
             account_id = account.id
             account_status_val = account.status.value
+
+    try:
+        r = await debounce_service.get_redis()
+        await r.delete(f"acc_disabled:{account_id}")
+    except Exception:
+        pass
 
     account_uuid_str = str(account_id)
     webhook_dest_url = f"{settings.BASE_URL}/webhook/{account_uuid_str}"
@@ -585,9 +616,9 @@ async def get_account_pipelines(account_id: uuid.UUID):
             pass
         raise HTTPException(status_code=400, detail=auth_err.detail)
 
-    # Сессия 2: Синхронизация с БД в короткой сессии
+    # Сессия 2: Синхронизация с БД в короткой сессии (с row-level блокировкой от гонок INSERT)
     async with AsyncSessionLocal() as session:
-        stmt = select(Account).options(selectinload(Account.pipelines)).where(Account.id == account_id)
+        stmt = select(Account).options(selectinload(Account.pipelines)).where(Account.id == account_id).with_for_update()
         account = (await session.execute(stmt)).scalar_one_or_none()
         if not account:
             raise HTTPException(status_code=404, detail="Аккаунт не найден")
@@ -644,8 +675,10 @@ async def update_account_pipelines(account_id: uuid.UUID, payload: UpdatePipelin
         for p in pipelines:
             p.is_enabled = (p.amo_pipeline_id in enabled_set)
 
-        acc_stmt = select(Account).where(Account.id == account_id)
-        account = (await session.execute(acc_stmt)).scalar_one()
+        acc_stmt = select(Account).where(Account.id == account_id).with_for_update()
+        account = (await session.execute(acc_stmt)).scalar_one_or_none()
+        if not account:
+            raise HTTPException(status_code=404, detail="Аккаунт не найден")
         if account.status not in (AccountStatus.VERIFIED, AccountStatus.CONFIGURED):
             account.status = AccountStatus.CONFIGURED
 
@@ -693,9 +726,9 @@ async def get_account_fields(account_id: uuid.UUID):
     amo_fields = lead_fields + contact_fields
     amo_field_ids = {af["id"] for af in amo_fields}
 
-    # Сессия 2: Синхронизация с БД в короткой сессии
+    # Сессия 2: Синхронизация с БД в короткой сессии (с row-level блокировкой от гонок INSERT)
     async with AsyncSessionLocal() as session:
-        stmt = select(Account).options(selectinload(Account.field_mappings)).where(Account.id == account_id)
+        stmt = select(Account).options(selectinload(Account.field_mappings)).where(Account.id == account_id).with_for_update()
         account = (await session.execute(stmt)).scalar_one_or_none()
         if not account:
             raise HTTPException(status_code=404, detail="Аккаунт не найден")
@@ -842,6 +875,12 @@ async def get_ai_config(account_id: uuid.UUID):
 async def update_ai_config(account_id: uuid.UUID, payload: UpdateAIConfigRequest):
     """Обновление настроек ИИ (системный промпт, модели, температура, база знаний, комментарии)"""
     async with AsyncSessionLocal() as session:
+        acc_exists = (await session.execute(
+            select(Account.id).where(Account.id == account_id).with_for_update()
+        )).scalar_one_or_none()
+        if not acc_exists:
+            raise HTTPException(status_code=404, detail="Аккаунт не найден")
+
         stmt = select(AIConfig).where(AIConfig.account_id == account_id)
         cfg = (await session.execute(stmt)).scalar_one_or_none()
         if not cfg:
@@ -885,7 +924,7 @@ async def sync_account_with_amocrm(account_id: uuid.UUID):
     1. Проверка токена и доступности amoCRM (обновление имени компании и очистка ошибок).
     2. Проверка и пересоздание скрытого поля 'AI: Ответ ассистента', если оно удалено.
     3. Синхронизация списка воронок (актуализация названий, добавление новых, авто-отключение удаленных).
-    4. Синхронизация кастомных полей сделок (актуализация типов/названий, авто-отключение удаленных).
+    4. Синхронизация кастомных полей сделок и контактов (актуализация типов/названий, авто-отключение удаленных).
     5. Проверка доступных Salesbot (проверка наличия привязанного бота).
     """
     # 1. Читаем реквизиты аккаунта в короткой сессии БД
@@ -940,14 +979,20 @@ async def sync_account_with_amocrm(account_id: uuid.UUID):
 
     reply_field_id = await amocrm_client.ensure_reply_field(subdomain, token)
 
+    pipelines_synced = False
     try:
         amo_pipelines = await amocrm_client.list_pipelines(subdomain, token)
+        pipelines_synced = True
     except Exception as e:
         logger.warning(f"Ошибка получения воронок при синхронизации {subdomain}: {e}")
         amo_pipelines = []
 
+    fields_synced = False
     try:
-        amo_fields = await amocrm_client.list_custom_fields(subdomain, token)
+        lead_fields = await amocrm_client.list_custom_fields(subdomain, token)
+        contact_fields = await amocrm_client.list_contact_custom_fields(subdomain, token)
+        amo_fields = lead_fields + contact_fields
+        fields_synced = True
     except Exception as e:
         logger.warning(f"Ошибка получения полей при синхронизации {subdomain}: {e}")
         amo_fields = []
@@ -964,7 +1009,7 @@ async def sync_account_with_amocrm(account_id: uuid.UUID):
         logger.warning(f"Ошибка получения ботов при синхронизации {subdomain}: {e}")
         bots = []
 
-    # 3. Синхронизация данных в БД в короткой сессии
+    # 3. Синхронизация данных в БД в короткой сессии под блокировкой строки Account
     async with AsyncSessionLocal() as session:
         stmt = (
             select(Account)
@@ -974,6 +1019,7 @@ async def sync_account_with_amocrm(account_id: uuid.UUID):
                 selectinload(Account.ai_config)
             )
             .where(Account.id == account_id)
+            .with_for_update()
         )
         account = (await session.execute(stmt)).scalar_one_or_none()
         if not account:
@@ -988,66 +1034,71 @@ async def sync_account_with_amocrm(account_id: uuid.UUID):
         if reply_field_id:
             account.ai_reply_field_id = reply_field_id
 
-        existing_pipelines = {p.amo_pipeline_id: p for p in account.pipelines}
-        amo_pipeline_ids = set()
-        for ap in amo_pipelines:
-            ap_id = ap["id"]
-            amo_pipeline_ids.add(ap_id)
-            if ap_id in existing_pipelines:
-                existing_pipelines[ap_id].name = ap["name"]
-            else:
-                new_p = Pipeline(
-                    account_id=account.id,
-                    amo_pipeline_id=ap_id,
-                    name=ap["name"],
-                    is_enabled=False
-                )
-                session.add(new_p)
+        if pipelines_synced:
+            existing_pipelines = {p.amo_pipeline_id: p for p in account.pipelines}
+            amo_pipeline_ids = set()
+            for ap in amo_pipelines:
+                ap_id = ap["id"]
+                amo_pipeline_ids.add(ap_id)
+                if ap_id in existing_pipelines:
+                    existing_pipelines[ap_id].name = ap["name"]
+                else:
+                    new_p = Pipeline(
+                        account_id=account.id,
+                        amo_pipeline_id=ap_id,
+                        name=ap["name"],
+                        is_enabled=False
+                    )
+                    session.add(new_p)
 
-        for p in account.pipelines:
-            if p.amo_pipeline_id not in amo_pipeline_ids and p.is_enabled:
-                p.is_enabled = False
-
-        amo_field_ids = {af["id"] for af in amo_fields}
-
-        reply_ids = {account.ai_reply_field_id} if account.ai_reply_field_id else set()
-        to_remove = [
-            fm for fm in account.field_mappings
-            if fm.amo_field_id in reply_ids or fm.field_name in ("AI: Ответ ассистента", "Ответ ИИ")
-        ]
-        for fm in to_remove:
-            await session.delete(fm)
-            account.field_mappings.remove(fm)
-
-        existing_fields = {fm.amo_field_id: fm for fm in account.field_mappings}
-        for af in amo_fields:
-            af_id = af["id"]
-            if af_id in reply_ids:
-                continue
-            if af.get("name") in ("AI: Ответ ассистента", "Ответ ИИ"):
-                continue
-
-            if af_id in existing_fields:
-                existing_fields[af_id].field_name = af["name"]
-                existing_fields[af_id].field_type = af.get("type", "text")
-            else:
-                new_fm = FieldMapping(
-                    account_id=account.id,
-                    amo_field_id=af_id,
-                    field_name=af["name"],
-                    field_type=af.get("type", "text"),
-                    is_enabled=False,
-                    ai_hint=f"Значение поля {af['name']}",
-                    overwrite_if_filled=False
-                )
-                session.add(new_fm)
+            for p in account.pipelines:
+                if p.amo_pipeline_id not in amo_pipeline_ids and p.is_enabled:
+                    p.is_enabled = False
 
         deleted_fields_count = 0
-        for fm in account.field_mappings:
-            if fm.amo_field_id not in amo_field_ids:
-                if fm.is_enabled:
-                    fm.is_enabled = False
-                    deleted_fields_count += 1
+        if fields_synced:
+            amo_field_ids = {af["id"] for af in amo_fields}
+
+            reply_ids = {account.ai_reply_field_id} if account.ai_reply_field_id else set()
+            to_remove = [
+                fm for fm in account.field_mappings
+                if fm.amo_field_id in reply_ids or fm.field_name in ("AI: Ответ ассистента", "Ответ ИИ")
+            ]
+            for fm in to_remove:
+                await session.delete(fm)
+                account.field_mappings.remove(fm)
+
+            existing_fields = {fm.amo_field_id: fm for fm in account.field_mappings}
+            for af in amo_fields:
+                af_id = af["id"]
+                if af_id in reply_ids:
+                    continue
+                if af.get("name") in ("AI: Ответ ассистента", "Ответ ИИ"):
+                    continue
+
+                entity = af.get("entity_type", "lead")
+                if af_id in existing_fields:
+                    existing_fields[af_id].field_name = af["name"]
+                    existing_fields[af_id].field_type = af.get("type", "text")
+                    existing_fields[af_id].entity_type = entity
+                else:
+                    new_fm = FieldMapping(
+                        account_id=account.id,
+                        amo_field_id=af_id,
+                        field_name=af["name"],
+                        field_type=af.get("type", "text"),
+                        entity_type=entity,
+                        is_enabled=False,
+                        ai_hint=f"Значение поля {af['name']}",
+                        overwrite_if_filled=False
+                    )
+                    session.add(new_fm)
+
+            for fm in account.field_mappings:
+                if fm.amo_field_id not in amo_field_ids:
+                    if fm.is_enabled:
+                        fm.is_enabled = False
+                        deleted_fields_count += 1
 
         if account.status == AccountStatus.ERROR:
             if account.webhook_verified:
