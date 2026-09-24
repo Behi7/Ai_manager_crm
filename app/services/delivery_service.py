@@ -361,7 +361,7 @@ class DeliveryService:
             history_payload = [{"role": m.role, "content": m.content} for m in recent_messages]
 
         # 4. Подготовка целевых полей (FieldMapping) в памяти (БЕЗ сессии БД)
-        amo_cf_values: Dict[int, str] = {}
+        amo_cf_values: Dict[Any, str] = {}
         if contact_amo_data:
             for cf in (contact_amo_data.get("custom_fields_values") or []):
                 fid = cf.get("field_id")
@@ -369,7 +369,8 @@ class DeliveryService:
                 if fid and vals:
                     val_str = str(vals[0].get("value") or "").strip()
                     if val_str:
-                        amo_cf_values[fid] = val_str
+                        amo_cf_values[("contact", fid)] = val_str
+                        amo_cf_values.setdefault(fid, val_str)
         if lead_amo_data:
             for cf in (lead_amo_data.get("custom_fields_values") or []):
                 fid = cf.get("field_id")
@@ -377,6 +378,7 @@ class DeliveryService:
                 if fid and vals:
                     val_str = str(vals[0].get("value") or "").strip()
                     if val_str:
+                        amo_cf_values[("lead", fid)] = val_str
                         amo_cf_values[fid] = val_str
 
         known_fields: Dict[str, str] = {}
@@ -387,7 +389,11 @@ class DeliveryService:
             if fm.amo_field_id == account.ai_reply_field_id:
                 continue
 
-            if fm.amo_field_id in amo_cf_values:
+            fm_entity = getattr(fm, "entity_type", None) or "lead"
+            fm_key = (fm_entity, fm.amo_field_id)
+            if fm_key in amo_cf_values:
+                known_fields[fm.field_name] = amo_cf_values[fm_key]
+            elif fm.amo_field_id in amo_cf_values and fm_entity == "lead":
                 known_fields[fm.field_name] = amo_cf_values[fm.amo_field_id]
             else:
                 target_fields.append({
@@ -434,9 +440,9 @@ class DeliveryService:
         ):
             try:
                 created_cache = await communicator.create_gemini_context_cache(
-                    system_prompt=prompt,
-                    knowledge_base=knowledge_base,
                     model_name=comm_model,
+                    system_instruction=prompt,
+                    knowledge_content=knowledge_base,
                     ttl_seconds=3600,
                 )
                 if isinstance(created_cache, str) and created_cache:
@@ -603,7 +609,49 @@ class DeliveryService:
 
         logger.info(f"Успешная доставка ответа ИИ лиду {amo_lead_id}: '{reply_text[:60]}...'")
 
-        # 8. ЭКСТРАКТОР: Внешние HTTP-вызовы Gemini и amoCRM (БЕЗ сессии БД)
+        # 8. ЭКСТРАКТОР: Изолируем от основного пайплайна, чтобы сбой или таймаут после отправки ответа
+        # не вызывал повторную отправку сообщения через restore_buffered_messages
+        try:
+            await self._run_extractor_step(
+                session=session,
+                account=account,
+                account_uuid=account_uuid,
+                amo_lead_id=amo_lead_id,
+                lead=lead,
+                lead_db_id=lead_db_id,
+                current_stuck_count=current_stuck_count,
+                subdomain=subdomain,
+                access_token=access_token,
+                ai_config=ai_config,
+                history_payload=history_payload,
+                reply_text=reply_text,
+                amo_cf_values=amo_cf_values,
+                media_parts=media_parts,
+                contact_id=contact_id,
+                contact_amo_data=contact_amo_data,
+            )
+        except BaseException as ext_err:
+            logger.error(f"Ошибка/таймаут на этапе работы Экстрактора для лида {amo_lead_id} (ответ клиенту уже доставлен): {ext_err}")
+
+    async def _run_extractor_step(
+        self,
+        session,
+        account,
+        account_uuid: uuid.UUID,
+        amo_lead_id: int,
+        lead,
+        lead_db_id,
+        current_stuck_count: int,
+        subdomain: str,
+        access_token: str,
+        ai_config,
+        history_payload,
+        reply_text: str,
+        amo_cf_values,
+        media_parts,
+        contact_id,
+        contact_amo_data,
+    ):
         enabled_mappings = [fm for fm in (account.field_mappings or []) if fm.is_enabled]
         if enabled_mappings:
             full_dialog = history_payload + [{"role": "assistant", "content": reply_text}]
@@ -627,10 +675,12 @@ class DeliveryService:
                 contact_fields_to_update = []
                 for item in ext_result.fields_to_update:
                     fid = item.get("field_id")
-                    if fm_entity_map.get(fid, "lead") == "contact":
-                        contact_fields_to_update.append(item)
+                    ent = item.get("entity_type") or fm_entity_map.get(fid, "lead")
+                    clean_item = {"field_id": fid, "values": item.get("values", [])}
+                    if ent == "contact":
+                        contact_fields_to_update.append(clean_item)
                     else:
-                        lead_fields_to_update.append(item)
+                        lead_fields_to_update.append(clean_item)
 
                 if lead_fields_to_update:
                     ext_patch_ok = await amocrm_client.patch_lead_custom_fields(

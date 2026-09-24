@@ -38,6 +38,7 @@ ADMIN_HTML = """<!DOCTYPE html>
       <a href="/docs" target="_blank" class="text-xs text-slate-400 hover:text-white px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 transition flex items-center gap-2">
         <i class="fa-solid fa-book"></i> Swagger Docs
       </a>
+      <button @click="logoutAdmin()" class="text-xs text-slate-400 hover:text-white px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 transition flex items-center gap-2"><i class="fa-solid fa-key"></i> Ключ API</button>
       <button @click="fetchAccounts()" class="text-xs text-slate-400 hover:text-white px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 transition flex items-center gap-2">
         <i class="fa-solid fa-rotate" :class="loading ? 'animate-spin' : ''"></i> Обновить
       </button>
@@ -49,6 +50,26 @@ ADMIN_HTML = """<!DOCTYPE html>
 
   <!-- Main content -->
   <main class="flex-1 max-w-7xl w-full mx-auto p-6 space-y-6">
+        <!-- Auth Modal (ADMIN_API_KEY) -->
+    <div x-show="showAuthModal" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
+      <div class="bg-slate-900 border border-slate-700 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
+        <div class="flex items-center justify-between">
+          <h3 class="text-base font-bold text-white flex items-center gap-2">
+            <i class="fa-solid fa-key text-indigo-400"></i> Авторизация администратора
+          </h3>
+          <button @click="showAuthModal = false" class="text-slate-400 hover:text-white">&times;</button>
+        </div>
+        <p class="text-xs text-slate-400">Введите <code class="text-indigo-300">ADMIN_API_KEY</code> из файла <code class="text-slate-300">.env</code> для доступа к управлению аккаунтами.</p>
+        <input type="password" x-model="adminKeyInput" @keyup.enter="submitAdminKey()" placeholder="Введите ADMIN_API_KEY..."
+               class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500">
+        <div class="flex justify-end gap-2">
+          <button @click="submitAdminKey()" class="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white">
+            Войти
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- Notifications banner / toast -->
     <div x-show="toast.show" x-transition x-cloak class="fixed bottom-6 right-6 z-50 max-w-md px-4 py-3 rounded-xl shadow-2xl flex items-center space-x-3 border"
          :class="toast.type === 'error' ? 'bg-red-950/90 border-red-800 text-red-200' : 'bg-emerald-950/90 border-emerald-800 text-emerald-200'">
@@ -575,7 +596,7 @@ ADMIN_HTML = """<!DOCTYPE html>
 
     function adminApp() {
       return {
-        adminKey: localStorage.getItem('ai_admin_key') || '__DEFAULT_ADMIN_KEY__',
+        adminKey: localStorage.getItem('ai_admin_key') || '',
         adminKeyInput: '',
         showAuthModal: false,
         accounts: [],
@@ -860,6 +881,7 @@ ADMIN_HTML = """<!DOCTYPE html>
             const payload = {
               fields: this.fields.map(f => ({
                 amo_field_id: f.amo_field_id,
+                entity_type: f.entity_type || 'lead',
                 is_enabled: f.is_enabled,
                 ai_hint: f.ai_hint,
                 overwrite_if_filled: f.overwrite_if_filled
@@ -935,14 +957,5 @@ ADMIN_HTML = """<!DOCTYPE html>
 @router.get("/", response_class=HTMLResponse)
 async def serve_admin_panel():
     """Главная страница панели управления amoCRM AI Manager"""
-    html = ADMIN_HTML.replace("__DEFAULT_ADMIN_KEY__", settings.ADMIN_API_KEY or "")
-    response = HTMLResponse(content=html)
-    if settings.ADMIN_API_KEY:
-        response.set_cookie(
-            key="admin_key",
-            value=settings.ADMIN_API_KEY,
-            max_age=2592000,
-            path="/",
-            samesite="lax",
-        )
-    return response
+    html = ADMIN_HTML.replace("__DEFAULT_ADMIN_KEY__", "")
+    return HTMLResponse(content=html)

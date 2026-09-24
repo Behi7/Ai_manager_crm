@@ -332,8 +332,11 @@ async def toggle_account_active(account_id: uuid.UUID):
 
     if target_active:
         # Внешний HTTP-вызов БЕЗ удержания транзакции БД
-        token = decrypt_token(encrypted_token)
-        token_check = await amocrm_client.validate_token(subdomain, token)
+        try:
+            token = decrypt_token(encrypted_token)
+            token_check = await amocrm_client.validate_token(subdomain, token)
+        except AmoCRMAuthOrBillingError as auth_err:
+            token_check = {"is_valid": False, "error": auth_err.detail}
 
         async with AsyncSessionLocal() as session:
             stmt = select(Account).where(Account.id == account_id)
@@ -437,10 +440,11 @@ async def list_amocrm_bots(account_id: uuid.UUID):
         if not account:
             raise HTTPException(status_code=404, detail="Аккаунт не найден")
         subdomain = account.subdomain
-        token = decrypt_token(account.encrypted_token)
+        encrypted_token = account.encrypted_token
 
     # Внешний HTTP-вызов БЕЗ удержания транзакции БД
     try:
+        token = decrypt_token(encrypted_token)
         bots = await amocrm_client.list_bots(subdomain, token)
         return [{"id": b["id"], "name": b["name"]} for b in bots]
     except AmoCRMAuthOrBillingError as auth_err:
@@ -500,7 +504,7 @@ async def test_bot_connection(account_id: uuid.UUID, payload: Optional[TestConne
         if not account.ai_reply_field_id:
             raise HTTPException(status_code=400, detail="Скрытое поле ai_reply_field_id отсутствует")
 
-        token = decrypt_token(account.encrypted_token)
+        encrypted_token = account.encrypted_token
         subdomain = account.subdomain
         bot_id = account.bot_id
         ai_reply_field_id = account.ai_reply_field_id
@@ -511,6 +515,7 @@ async def test_bot_connection(account_id: uuid.UUID, payload: Optional[TestConne
 
     # 2. Внешние HTTP-вызовы amoCRM БЕЗ сессии БД
     try:
+        token = decrypt_token(encrypted_token)
         if not lead_id:
             lead_obj = None
             if enabled_pipes:
@@ -595,10 +600,11 @@ async def get_account_pipelines(account_id: uuid.UUID):
         if not account:
             raise HTTPException(status_code=404, detail="Аккаунт не найден")
         subdomain = account.subdomain
-        token = decrypt_token(account.encrypted_token)
+        encrypted_token = account.encrypted_token
 
     # Внешний HTTP-вызов БЕЗ удержания транзакции БД
     try:
+        token = decrypt_token(encrypted_token)
         amo_pipelines = await amocrm_client.list_pipelines(subdomain, token)
     except AmoCRMAuthOrBillingError as auth_err:
         async with AsyncSessionLocal() as session:
@@ -701,10 +707,11 @@ async def get_account_fields(account_id: uuid.UUID):
         if not account:
             raise HTTPException(status_code=404, detail="Аккаунт не найден")
         subdomain = account.subdomain
-        token = decrypt_token(account.encrypted_token)
+        encrypted_token = account.encrypted_token
 
     # Внешние HTTP-вызовы БЕЗ удержания транзакции БД
     try:
+        token = decrypt_token(encrypted_token)
         lead_fields = await amocrm_client.list_custom_fields(subdomain, token)
         contact_fields = await amocrm_client.list_contact_custom_fields(subdomain, token)
     except AmoCRMAuthOrBillingError as auth_err:
@@ -724,7 +731,7 @@ async def get_account_fields(account_id: uuid.UUID):
         raise HTTPException(status_code=400, detail=auth_err.detail)
 
     amo_fields = lead_fields + contact_fields
-    amo_field_ids = {af["id"] for af in amo_fields}
+    amo_field_keys = {(af.get("entity_type", "lead"), af["id"]) for af in amo_fields}
 
     # Сессия 2: Синхронизация с БД в короткой сессии (с row-level блокировкой от гонок INSERT)
     async with AsyncSessionLocal() as session:
@@ -743,7 +750,7 @@ async def get_account_fields(account_id: uuid.UUID):
             await session.delete(fm)
             account.field_mappings.remove(fm)
 
-        existing_map = {fm.amo_field_id: fm for fm in account.field_mappings}
+        existing_map = {(getattr(fm, "entity_type", None) or "lead", fm.amo_field_id): fm for fm in account.field_mappings}
         for af in amo_fields:
             af_id = af["id"]
             if af_id in reply_ids:
@@ -752,10 +759,10 @@ async def get_account_fields(account_id: uuid.UUID):
                 continue
 
             entity = af.get("entity_type", "lead")
-            if af_id in existing_map:
-                existing_map[af_id].field_name = af["name"]
-                existing_map[af_id].field_type = af.get("type", "text")
-                existing_map[af_id].entity_type = entity
+            if (entity, af_id) in existing_map:
+                existing_map[(entity, af_id)].field_name = af["name"]
+                existing_map[(entity, af_id)].field_type = af.get("type", "text")
+                existing_map[(entity, af_id)].entity_type = entity
             else:
                 new_fm = FieldMapping(
                     account_id=account.id,
@@ -771,7 +778,8 @@ async def get_account_fields(account_id: uuid.UUID):
 
         # Автоматически отключаем поля, которые удалили в amoCRM
         for fm in account.field_mappings:
-            if fm.amo_field_id not in amo_field_ids:
+            fm_entity = getattr(fm, "entity_type", None) or "lead"
+            if (fm_entity, fm.amo_field_id) not in amo_field_keys:
                 if fm.is_enabled:
                     logger.warning(
                         f"Поле {fm.field_name} (ID: {fm.amo_field_id}) удалено в amoCRM. "
@@ -803,7 +811,7 @@ async def get_account_fields(account_id: uuid.UUID):
                 "is_enabled": fm.is_enabled,
                 "ai_hint": fm.ai_hint,
                 "overwrite_if_filled": fm.overwrite_if_filled,
-                "is_deleted_in_amo": fm.amo_field_id not in amo_field_ids
+                "is_deleted_in_amo": ((getattr(fm, "entity_type", None) or "lead"), fm.amo_field_id) not in amo_field_keys
             }
             for fm in all_mappings
         ]
@@ -831,11 +839,16 @@ async def update_account_fields(account_id: uuid.UUID, payload: UpdateFieldsRequ
     async with AsyncSessionLocal() as session:
         stmt = select(FieldMapping).where(FieldMapping.account_id == account_id)
         mappings = (await session.execute(stmt)).scalars().all()
-        mapping_dict = {m.amo_field_id: m for m in mappings}
+        mapping_by_tuple = {((getattr(m, "entity_type", None) or "lead"), m.amo_field_id): m for m in mappings}
+        mapping_by_id = {m.amo_field_id: m for m in mappings}
 
         for item in payload.fields:
-            if item.amo_field_id in mapping_dict:
-                m = mapping_dict[item.amo_field_id]
+            m = None
+            if item.entity_type and (item.entity_type, item.amo_field_id) in mapping_by_tuple:
+                m = mapping_by_tuple[(item.entity_type, item.amo_field_id)]
+            elif item.amo_field_id in mapping_by_id:
+                m = mapping_by_id[item.amo_field_id]
+            if m is not None:
                 m.is_enabled = item.is_enabled
                 if item.ai_hint is not None:
                     m.ai_hint = item.ai_hint
@@ -934,12 +947,13 @@ async def sync_account_with_amocrm(account_id: uuid.UUID):
         if not account:
             raise HTTPException(status_code=404, detail="Аккаунт не найден")
 
-        token = decrypt_token(account.encrypted_token)
+        encrypted_token = account.encrypted_token
         subdomain = account.subdomain
         account_bot_id = account.bot_id
 
     # 2. Внешние HTTP-вызовы amoCRM БЕЗ сессии БД
     try:
+        token = decrypt_token(encrypted_token)
         token_check = await amocrm_client.validate_token(subdomain, token)
     except AmoCRMAuthOrBillingError as auth_err:
         async with AsyncSessionLocal() as session:
@@ -1057,7 +1071,7 @@ async def sync_account_with_amocrm(account_id: uuid.UUID):
 
         deleted_fields_count = 0
         if fields_synced:
-            amo_field_ids = {af["id"] for af in amo_fields}
+            amo_field_keys = {(af.get("entity_type", "lead"), af["id"]) for af in amo_fields}
 
             reply_ids = {account.ai_reply_field_id} if account.ai_reply_field_id else set()
             to_remove = [
@@ -1068,7 +1082,7 @@ async def sync_account_with_amocrm(account_id: uuid.UUID):
                 await session.delete(fm)
                 account.field_mappings.remove(fm)
 
-            existing_fields = {fm.amo_field_id: fm for fm in account.field_mappings}
+            existing_fields = {(getattr(fm, "entity_type", None) or "lead", fm.amo_field_id): fm for fm in account.field_mappings}
             for af in amo_fields:
                 af_id = af["id"]
                 if af_id in reply_ids:
@@ -1077,10 +1091,10 @@ async def sync_account_with_amocrm(account_id: uuid.UUID):
                     continue
 
                 entity = af.get("entity_type", "lead")
-                if af_id in existing_fields:
-                    existing_fields[af_id].field_name = af["name"]
-                    existing_fields[af_id].field_type = af.get("type", "text")
-                    existing_fields[af_id].entity_type = entity
+                if (entity, af_id) in existing_fields:
+                    existing_fields[(entity, af_id)].field_name = af["name"]
+                    existing_fields[(entity, af_id)].field_type = af.get("type", "text")
+                    existing_fields[(entity, af_id)].entity_type = entity
                 else:
                     new_fm = FieldMapping(
                         account_id=account.id,
@@ -1095,7 +1109,8 @@ async def sync_account_with_amocrm(account_id: uuid.UUID):
                     session.add(new_fm)
 
             for fm in account.field_mappings:
-                if fm.amo_field_id not in amo_field_ids:
+                fm_entity = getattr(fm, "entity_type", None) or "lead"
+                if (fm_entity, fm.amo_field_id) not in amo_field_keys:
                     if fm.is_enabled:
                         fm.is_enabled = False
                         deleted_fields_count += 1

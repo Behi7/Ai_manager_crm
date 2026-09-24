@@ -114,7 +114,7 @@ class FieldMapping(Base):
     account: Mapped["Account"] = relationship("Account", back_populates="field_mappings")
 
     __table_args__ = (
-        UniqueConstraint("account_id", "amo_field_id", name="uq_field_account_amo_id"),
+        UniqueConstraint("account_id", "entity_type", "amo_field_id", name="uq_field_account_entity_amo_id"),
     )
 
 
