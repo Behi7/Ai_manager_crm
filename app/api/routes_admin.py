@@ -1,6 +1,7 @@
 import logging
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
+from app.core.config import settings
 
 logger = logging.getLogger("AdminRouter")
 router = APIRouter(tags=["Admin Panel"])
@@ -574,6 +575,9 @@ ADMIN_HTML = """<!DOCTYPE html>
 
     function adminApp() {
       return {
+        adminKey: localStorage.getItem('ai_admin_key') || '__DEFAULT_ADMIN_KEY__',
+        adminKeyInput: '',
+        showAuthModal: false,
         accounts: [],
         loading: false,
         syncing: false,
@@ -674,8 +678,15 @@ ADMIN_HTML = """<!DOCTYPE html>
           this.loading = true;
           try {
             const res = await this.apiFetch('/accounts');
-            this.accounts = await res.json();
+            if (res.ok) {
+              const data = await res.json();
+              this.accounts = Array.isArray(data) ? data : [];
+            } else {
+              this.accounts = [];
+              this.showToast('Ошибка авторизации API (проверьте ADMIN_API_KEY)', 'error');
+            }
           } catch (e) {
+            this.accounts = [];
             this.showToast('Ошибка загрузки аккаунтов', 'error');
           } finally {
             this.loading = false;
@@ -924,4 +935,14 @@ ADMIN_HTML = """<!DOCTYPE html>
 @router.get("/", response_class=HTMLResponse)
 async def serve_admin_panel():
     """Главная страница панели управления amoCRM AI Manager"""
-    return HTMLResponse(content=ADMIN_HTML)
+    html = ADMIN_HTML.replace("__DEFAULT_ADMIN_KEY__", settings.ADMIN_API_KEY or "")
+    response = HTMLResponse(content=html)
+    if settings.ADMIN_API_KEY:
+        response.set_cookie(
+            key="admin_key",
+            value=settings.ADMIN_API_KEY,
+            max_age=2592000,
+            path="/",
+            samesite="lax",
+        )
+    return response
