@@ -434,6 +434,40 @@ class DeliveryService:
                         amo_cf_values[("lead", fid)] = val_str
                         amo_cf_values[fid] = val_str
 
+        ai_config = account.ai_config
+
+        # 4.1. СНАЧАЛА запускаем Экстрактор по входящему сообщению и медиа ДО генерации ответа Общителя,
+        # чтобы все данные, которые клиент сообщил в текущем сообщении, сразу попали в known_fields и ушли из target_fields!
+        extracted_items_pre: List[Dict[str, Any]] = []
+        disabled_field_keys_pre: set = set()
+        try:
+            extracted_items_pre, disabled_field_keys_pre = await self._run_extractor_step(
+                session=session,
+                account=account,
+                account_uuid=account_uuid,
+                amo_lead_id=amo_lead_id,
+                lead=lead,
+                lead_db_id=lead_db_id,
+                current_stuck_count=current_stuck_count,
+                subdomain=subdomain,
+                access_token=access_token,
+                ai_config=ai_config,
+                history_payload=history_payload,
+                reply_text="",
+                amo_cf_values=amo_cf_values,
+                media_parts=media_parts,
+                contact_id=contact_id,
+                contact_amo_data=contact_amo_data,
+                active_pipeline=active_pipeline,
+                lead_amo_data=lead_amo_data,
+                skip_stage_advance=True,
+            )
+            if extracted_items_pre:
+                current_stuck_count = 0
+        except BaseException as ext_err:
+            logger.error(f"Ошибка/таймаут на этапе предварительной работы Экстрактора для лида {amo_lead_id}: {ext_err}")
+
+        # 4.2. Формируем known_fields и target_fields уже с учётом только что извлечённых данных
         known_fields: Dict[str, str] = {}
         target_fields: List[Dict[str, str]] = []
         for fm in (account.field_mappings or []):
@@ -459,8 +493,6 @@ class DeliveryService:
             lead_tags = [t.get("name", "").lower() for t in ((lead_amo_data.get("_embedded") or {}).get("tags") or [])]
             if any("comment" in t or "коммент" in t for t in lead_tags):
                 is_comment_lead = True
-
-        ai_config = account.ai_config
         prompt = ai_config.communicator_prompt if ai_config else "Ты вежливый ИИ-менеджер."
         if is_comment_lead and ai_config and ai_config.comment_prompt:
             prompt = ai_config.comment_prompt
@@ -610,6 +642,22 @@ class DeliveryService:
 
         reply_text = comm_resp.text
 
+        # 5.8. Автоматическое продвижение сделки по этапам воронки (0 -> 1 -> 2 -> 3) ДО записи Ответ ИИ и запуска Salesbot
+        try:
+            await self._advance_pipeline_stage(
+                account=account,
+                amo_lead_id=amo_lead_id,
+                subdomain=subdomain,
+                access_token=access_token,
+                amo_cf_values=amo_cf_values,
+                extracted_items=extracted_items_pre,
+                disabled_field_keys=disabled_field_keys_pre,
+                active_pipeline=active_pipeline,
+                lead_amo_data=lead_amo_data,
+            )
+        except Exception as stg_err:
+            logger.error(f"Ошибка при продвижении этапа сделки #{amo_lead_id}: {stg_err}")
+
         # 6. Внешние HTTP-вызовы: Запись в поле сделки и запуск Salesbot (БЕЗ сессии БД)
         reply_field_id = account.ai_reply_field_id
         patch_ok = False
@@ -682,31 +730,7 @@ class DeliveryService:
 
         logger.info(f"Успешная доставка ответа ИИ лиду {amo_lead_id}: '{reply_text[:60]}...'")
 
-        # 8. ЭКСТРАКТОР: Изолируем от основного пайплайна, чтобы сбой или таймаут после отправки ответа
-        # не вызывал повторную отправку сообщения через restore_buffered_messages
-        try:
-            await self._run_extractor_step(
-                session=session,
-                account=account,
-                account_uuid=account_uuid,
-                amo_lead_id=amo_lead_id,
-                lead=lead,
-                lead_db_id=lead_db_id,
-                current_stuck_count=current_stuck_count,
-                subdomain=subdomain,
-                access_token=access_token,
-                ai_config=ai_config,
-                history_payload=history_payload,
-                reply_text=reply_text,
-                amo_cf_values=amo_cf_values,
-                media_parts=media_parts,
-                contact_id=contact_id,
-                contact_amo_data=contact_amo_data,
-                active_pipeline=active_pipeline,
-                lead_amo_data=lead_amo_data,
-            )
-        except BaseException as ext_err:
-            logger.error(f"Ошибка/таймаут на этапе работы Экстрактора для лида {amo_lead_id} (ответ клиенту уже доставлен): {ext_err}")
+        # (Экстрактор и продвижение этапа уже выполнены на шагах 4.1 и 5.8)
 
     async def _run_extractor_step(
         self,
@@ -728,12 +752,13 @@ class DeliveryService:
         contact_amo_data,
         active_pipeline=None,
         lead_amo_data=None,
+        skip_stage_advance: bool = False,
     ):
         enabled_mappings = [fm for fm in (account.field_mappings or []) if fm.is_enabled]
         extracted_items: List[Dict[str, Any]] = []
         disabled_field_keys: set = set()
         if enabled_mappings:
-            full_dialog = history_payload + [{"role": "assistant", "content": reply_text}]
+            full_dialog = (history_payload + [{"role": "assistant", "content": reply_text}]) if reply_text else list(history_payload)
             account_gemini_key = (getattr(ai_config, "gemini_api_key", None) or "").strip() or None
             ext_model = ai_config.extractor_model if ai_config else "gemini-3.1-flash-lite"
             fallback_ext_model = ai_config.fallback_extractor_model if ai_config and ai_config.fallback_extractor_model else "gemini-2.5-flash"
@@ -860,6 +885,53 @@ class DeliveryService:
                     lead.stuck_count = current_stuck_count + 1
                     await db.commit()
 
+        # Обновляем amo_cf_values в оперативной памяти для немедленного использования в Общителе
+        if extracted_items and isinstance(amo_cf_values, dict):
+            fm_id_to_ent_mem = {
+                fm.amo_field_id: (
+                    fm.entity_type
+                    if isinstance(getattr(fm, "entity_type", None), str) and fm.entity_type in ("lead", "contact")
+                    else "lead"
+                )
+                for fm in enabled_mappings
+            }
+            for item in extracted_items:
+                fid = item.get("field_id")
+                vals = item.get("values") or []
+                val_str = str((vals[0] or {}).get("value") or "").strip() if vals else ""
+                if fid and val_str:
+                    ent = item.get("entity_type") or fm_id_to_ent_mem.get(fid, "lead")
+                    if (ent, int(fid)) not in disabled_field_keys:
+                        amo_cf_values[(ent, int(fid))] = val_str
+                        amo_cf_values[int(fid)] = val_str
+
+        if not skip_stage_advance:
+            await self._advance_pipeline_stage(
+                account=account,
+                amo_lead_id=amo_lead_id,
+                subdomain=subdomain,
+                access_token=access_token,
+                amo_cf_values=amo_cf_values,
+                extracted_items=extracted_items,
+                disabled_field_keys=disabled_field_keys,
+                active_pipeline=active_pipeline,
+                lead_amo_data=lead_amo_data,
+            )
+        return extracted_items, disabled_field_keys
+
+    async def _advance_pipeline_stage(
+        self,
+        account,
+        amo_lead_id: int,
+        subdomain: str,
+        access_token: str,
+        amo_cf_values,
+        extracted_items: List[Dict[str, Any]],
+        disabled_field_keys: set,
+        active_pipeline=None,
+        lead_amo_data=None,
+    ):
+        enabled_mappings = [fm for fm in (account.field_mappings or []) if fm.is_enabled]
         # 10. Автоматическое продвижение сделки по этапам воронки (0 -> 1 -> 2 -> 3) БЕЗ отключения ИИ на 3-м этапе
         if active_pipeline and lead_amo_data:
             p_stages = getattr(active_pipeline, "stages_json", None)

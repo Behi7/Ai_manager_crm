@@ -1,3 +1,4 @@
+import re
 import asyncio
 import json
 import logging
@@ -24,6 +25,27 @@ class ExtractionResult:
 class LLMExtractor:
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or settings.GEMINI_API_KEY
+
+    @staticmethod
+    def _is_same_or_redundant_value(existing: Any, new_val: Any, field_type: Optional[str], field_name: Optional[str]) -> bool:
+        ex_str = str(existing or "").strip()
+        nw_str = str(new_val or "").strip()
+        if not ex_str or not nw_str:
+            return False
+        if ex_str.lower() == nw_str.lower():
+            return True
+        ft = (field_type or "").lower()
+        fn = (field_name or "").lower()
+        if ft == "multitext" or "телефон" in fn or "phone" in fn or "raqam" in fn or "номер" in fn:
+            ex_digits = re.sub(r"\D", "", ex_str)
+            nw_digits = re.sub(r"\D", "", nw_str)
+            if len(ex_digits) >= 7 and len(nw_digits) >= 7 and ex_digits[-9:] == nw_digits[-9:]:
+                return True
+        ex_clean = re.sub(r"[^\w\s]", "", ex_str.lower()).strip()
+        nw_clean = re.sub(r"[^\w\s]", "", nw_str.lower()).strip()
+        if ex_clean and nw_clean and (ex_clean == nw_clean or ex_clean in nw_clean or nw_clean in ex_clean):
+            return True
+        return False
 
     async def extract_lead_fields(
         self,
@@ -61,7 +83,9 @@ class LLMExtractor:
             entity = (fm.entity_type if isinstance(getattr(fm, "entity_type", None), str) and fm.entity_type in ("lead", "contact") else "lead")
             prop_key = f"field_{entity}_{fm.amo_field_id}"
             hint = f" ({fm.ai_hint})" if fm.ai_hint else ""
-            fields_desc.append(f'- key: "{prop_key}", Название: "{fm.field_name}"{hint}, Сущность: {entity}, Тип: {fm.field_type}')
+            existing_val = current_values.get((entity, fm.amo_field_id), current_values.get(fm.amo_field_id))
+            cur_val_str = f', Текущее значение в CRM: "{existing_val}"' if (existing_val is not None and str(existing_val).strip() != "") else ', Текущее значение в CRM: ПУСТО'
+            fields_desc.append(f'- key: "{prop_key}", Название: "{fm.field_name}"{hint}, Сущность: {entity}, Тип: {fm.field_type}{cur_val_str}')
             
             # Схема типов для Gemini
             ft = (fm.field_type or "").lower()
@@ -88,9 +112,10 @@ class LLMExtractor:
             f"{fields_doc}\n\n"
             "ПРАВИЛА:\n"
             "1. Извлекай только ту информацию, о которой клиент явно сообщил сам или подтвердил слова менеджера.\n"
-            "2. Если поле не упоминалось или нет уверенности — НЕ добавляй его в результат или укажи null.\n"
-            "3. Не придумывай и не домысливай факты.\n"
-            "4. Верни JSON-объект, где ключи — это строго идентификаторы полей (например field_12345), а значения — извлеченные данные."
+            "2. ВНИМАНИЕ: Если у поля уже указано 'Текущее значение в CRM' (не ПУСТО), и клиент в ПОСЛЕДНЕМ сообщении явно НЕ исправлял и НЕ менял это значение на другое — ОБЯЗАТЕЛЬНО верни null (или не включай это поле в результат)! Категорически запрещено повторно извлекать или перефразировать старые ответы из истории диалога, которые уже записаны в CRM.\n"
+            "3. Если поле не упоминалось или нет уверенности — НЕ добавляй его в результат или укажи null.\n"
+            "4. Не придумывай и не домысливай факты.\n"
+            "5. Верни JSON-объект, где ключи — это строго идентификаторы полей (например field_lead_12345), а значения — только НОВЫЕ или ИЗМЕНЕННЫЕ данные."
         )
 
         user_content = f"Диалог:\n{conv_text}\n\nИзвлеки все релевантные поля."
@@ -216,11 +241,12 @@ class LLMExtractor:
             if val is None or val == "" or val == "null":
                 continue
 
-            # Проверяем, заполнено ли уже поле и разрешена ли перезапись
-            if not fm.overwrite_if_filled:
-                existing = current_values.get((entity, fm.amo_field_id), current_values.get(fm.amo_field_id))
-                if existing is not None and existing != "":
-                    # Пропускаем, так как перезапись отключена
+            # Проверяем, заполнено ли уже поле и изменилось ли значение по существу
+            existing = current_values.get((entity, fm.amo_field_id), current_values.get(fm.amo_field_id))
+            if existing is not None and str(existing).strip() != "":
+                if not fm.overwrite_if_filled:
+                    continue
+                if self._is_same_or_redundant_value(existing, val, fm.field_type, fm.field_name):
                     continue
 
             val_obj: Dict[str, Any] = {"value": val}
