@@ -1088,7 +1088,23 @@ async def sync_account_with_amocrm(account_id: uuid.UUID):
     try:
         lead_fields = await amocrm_client.list_custom_fields(subdomain, token)
         contact_fields = await amocrm_client.list_contact_custom_fields(subdomain, token)
-        amo_fields = lead_fields + contact_fields
+        system_fields = [
+            {
+                "id": -1,
+                "name": "Имя контакта",
+                "type": "text",
+                "entity_type": "contact",
+                "default_hint": "Настоящее имя клиента (если в нике мессенджера нормальное имя человека — используй его, иначе узнай в диалоге)",
+            },
+            {
+                "id": -2,
+                "name": "Название сделки",
+                "type": "text",
+                "entity_type": "lead",
+                "default_hint": "Краткое название сделки (например: Имя клиента + какой продукт/услугу хочет)",
+            },
+        ]
+        amo_fields = system_fields + lead_fields + contact_fields
         fields_synced = True
     except Exception as e:
         logger.warning(f"Ошибка получения полей при синхронизации {subdomain}: {e}")
@@ -1200,6 +1216,8 @@ async def sync_account_with_amocrm(account_id: uuid.UUID):
                     session.add(new_fm)
 
             for fm in account.field_mappings:
+                if fm.amo_field_id < 0:
+                    continue
                 fm_entity = _norm_entity(getattr(fm, "entity_type", None))
                 if (fm_entity, fm.amo_field_id) not in amo_field_keys:
                     if fm.is_enabled:
