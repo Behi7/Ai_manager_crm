@@ -6,7 +6,7 @@ from sqlalchemy import (
     String, Text, Boolean, BigInteger, LargeBinary,
     Numeric, Integer, DateTime, ForeignKey, Enum as SQLEnum, UniqueConstraint
 )
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
