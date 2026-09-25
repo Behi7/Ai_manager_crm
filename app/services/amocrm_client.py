@@ -378,12 +378,26 @@ class AmoCRMClient:
                         "values": [{"value": str(val)}]
                     })
 
-        if not custom_fields_values:
+        lead_name_val = None
+        filtered_cf = []
+        for cf_item in custom_fields_values:
+            if int(cf_item.get("field_id") or 0) == -2:
+                vals = cf_item.get("values") or []
+                if vals and vals[0].get("value"):
+                    lead_name_val = str(vals[0]["value"]).strip()
+            else:
+                filtered_cf.append(cf_item)
+
+        if not filtered_cf and not lead_name_val:
             return True
 
         await self.rate_limiter.wait(subdomain)
         url = f"{self._base_url(subdomain)}/api/v4/leads/{lead_id}"
-        payload = {"custom_fields_values": custom_fields_values}
+        payload: Dict[str, Any] = {}
+        if lead_name_val:
+            payload["name"] = lead_name_val
+        if filtered_cf:
+            payload["custom_fields_values"] = filtered_cf
         try:
             client = await self.get_client()
             resp = await client.patch(url, json=payload, headers=self._headers(t))
@@ -413,11 +427,25 @@ class AmoCRMClient:
         PATCH /api/v4/contacts/{contact_id}
         """
         t = token or access_token or ""
-        if not fields:
+        contact_name_val = None
+        filtered_cf = []
+        for cf_item in fields:
+            if int(cf_item.get("field_id") or 0) == -1:
+                vals = cf_item.get("values") or []
+                if vals and vals[0].get("value"):
+                    contact_name_val = str(vals[0]["value"]).strip()
+            else:
+                filtered_cf.append(cf_item)
+
+        if not filtered_cf and not contact_name_val:
             return True
         await self.rate_limiter.wait(subdomain)
         url = f"{self._base_url(subdomain)}/api/v4/contacts/{contact_id}"
-        payload = {"custom_fields_values": fields}
+        payload: Dict[str, Any] = {}
+        if contact_name_val:
+            payload["name"] = contact_name_val
+        if filtered_cf:
+            payload["custom_fields_values"] = filtered_cf
         try:
             client = await self.get_client()
             resp = await client.patch(url, json=payload, headers=self._headers(t))

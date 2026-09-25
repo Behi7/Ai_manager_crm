@@ -413,8 +413,37 @@ class DeliveryService:
             recent_messages = list(reversed(db_messages))
             history_payload = [{"role": m.role, "content": m.content} for m in recent_messages]
 
+            ext_hist_stmt = select(ExtractionLog).where(ExtractionLog.lead_id == lead_db_id).order_by(ExtractionLog.created_at.asc())
+            ext_hist_rows = (await db.execute(ext_hist_stmt)).scalars().all()
+            previously_extracted_raw: Dict[str, str] = {}
+            if isinstance(ext_hist_rows, (list, tuple)):
+                for er in ext_hist_rows:
+                    raw_r = getattr(er, "raw_response", None) or {}
+                    if isinstance(raw_r, dict):
+                        for rk, rv in raw_r.items():
+                            if rv is not None and str(rv).strip() and str(rv).strip() != "null":
+                                previously_extracted_raw[str(rk)] = str(rv).strip()
+
         # 4. Подготовка целевых полей (FieldMapping) в памяти (БЕЗ сессии БД)
         amo_cf_values: Dict[Any, str] = {}
+        if contact_amo_data:
+            raw_c_name = str(contact_amo_data.get("name") or "").strip()
+            if raw_c_name:
+                amo_cf_values["raw_contact_name"] = raw_c_name
+        if lead_amo_data:
+            raw_l_name = str(lead_amo_data.get("name") or "").strip()
+            if raw_l_name:
+                amo_cf_values["raw_lead_name"] = raw_l_name
+        if "field_contact_sys_name" in previously_extracted_raw or "field_contact_-1" in previously_extracted_raw:
+            c_sys_val = previously_extracted_raw.get("field_contact_sys_name") or previously_extracted_raw.get("field_contact_-1")
+            if c_sys_val:
+                amo_cf_values[("contact", -1)] = c_sys_val
+                amo_cf_values[-1] = c_sys_val
+        if "field_lead_sys_name" in previously_extracted_raw or "field_lead_-2" in previously_extracted_raw:
+            l_sys_val = previously_extracted_raw.get("field_lead_sys_name") or previously_extracted_raw.get("field_lead_-2")
+            if l_sys_val:
+                amo_cf_values[("lead", -2)] = l_sys_val
+                amo_cf_values[-2] = l_sys_val
         if contact_amo_data:
             for cf in (contact_amo_data.get("custom_fields_values") or []):
                 fid = cf.get("field_id")

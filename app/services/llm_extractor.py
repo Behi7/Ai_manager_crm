@@ -81,10 +81,32 @@ class LLMExtractor:
         schema_props = {}
         for fm in enabled_fields:
             entity = (fm.entity_type if isinstance(getattr(fm, "entity_type", None), str) and fm.entity_type in ("lead", "contact") else "lead")
-            prop_key = f"field_{entity}_{fm.amo_field_id}"
+            if fm.amo_field_id == -1:
+                prop_key = "field_contact_sys_name"
+            elif fm.amo_field_id == -2:
+                prop_key = "field_lead_sys_name"
+            else:
+                prop_key = f"field_{entity}_{fm.amo_field_id}"
             hint = f" ({fm.ai_hint})" if fm.ai_hint else ""
             existing_val = current_values.get((entity, fm.amo_field_id), current_values.get(fm.amo_field_id))
-            cur_val_str = f', Текущее значение в CRM: "{existing_val}"' if (existing_val is not None and str(existing_val).strip() != "") else ', Текущее значение в CRM: ПУСТО'
+            if existing_val is not None and str(existing_val).strip() != "":
+                cur_val_str = f', Текущее значение в CRM: "{existing_val}"'
+            elif fm.amo_field_id == -1:
+                raw_nick = str(current_values.get("raw_contact_name") or "").strip()
+                cur_val_str = (
+                    f', Текущее значение в CRM: ПУСТО (Ник контакта из мессенджера Telegram/Instagram: "{raw_nick}". '
+                    "ПРАВИЛО ДЛЯ ИМЕНИ КОНТАКТА: Если клиент назвал своё имя в диалоге — верни это имя. "
+                    f'Если в диалоге ещё не называл, посмотри на ник мессенджера "{raw_nick}": если там написано настоящее человеческое имя (например Salohiddin, Алишер, Hojiakbar, Дильшод) — верни это имя! '
+                    "Если же в нике написано название компании/отдела вроде Texnik Bo'lim, Marketing Markazi, магазин, либо случайный набор букв/цифр вроде йцуке123, user777, смайлики — НЕ используй ник и верни null!)"
+                )
+            elif fm.amo_field_id == -2:
+                raw_lead = str(current_values.get("raw_lead_name") or "").strip()
+                cur_val_str = (
+                    f', Текущее значение в CRM: ПУСТО (Сейчас авто-шаблон amoCRM: "{raw_lead}". '
+                    "Сформируй краткое название сделки только тогда, когда уже понятна суть запроса клиента или его имя + запрос; если клиент только поздоровался — верни null)"
+                )
+            else:
+                cur_val_str = ', Текущее значение в CRM: ПУСТО'
             fields_desc.append(f'- key: "{prop_key}", Название: "{fm.field_name}"{hint}, Сущность: {entity}, Тип: {fm.field_type}{cur_val_str}')
             
             # Схема типов для Gemini
@@ -236,8 +258,13 @@ class LLMExtractor:
 
         for fm in enabled_fields:
             entity = (fm.entity_type if isinstance(getattr(fm, "entity_type", None), str) and fm.entity_type in ("lead", "contact") else "lead")
-            prop_key = f"field_{entity}_{fm.amo_field_id}"
-            val = parsed.get(prop_key, parsed.get(f"field_{fm.amo_field_id}"))
+            if fm.amo_field_id == -1:
+                prop_key = "field_contact_sys_name"
+            elif fm.amo_field_id == -2:
+                prop_key = "field_lead_sys_name"
+            else:
+                prop_key = f"field_{entity}_{fm.amo_field_id}"
+            val = parsed.get(prop_key, parsed.get(f"field_{entity}_{fm.amo_field_id}", parsed.get(f"field_{fm.amo_field_id}")))
             if val is None or val == "" or val == "null":
                 continue
 

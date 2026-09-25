@@ -776,7 +776,23 @@ async def get_account_fields(account_id: uuid.UUID):
             pass
         raise HTTPException(status_code=400, detail=auth_err.detail)
 
-    amo_fields = lead_fields + contact_fields
+    system_fields = [
+        {
+            "id": -1,
+            "name": "Имя контакта",
+            "type": "text",
+            "entity_type": "contact",
+            "default_hint": "Настоящее имя клиента (если в нике мессенджера нормальное имя человека — используй его, иначе узнай в диалоге)",
+        },
+        {
+            "id": -2,
+            "name": "Название сделки",
+            "type": "text",
+            "entity_type": "lead",
+            "default_hint": "Краткое название сделки (например: Имя клиента + какой продукт/услугу хочет)",
+        },
+    ]
+    amo_fields = system_fields + lead_fields + contact_fields
     amo_field_keys = {(_norm_entity(af.get("entity_type", "lead")), af["id"]) for af in amo_fields}
 
     # Сессия 2: Синхронизация с БД в короткой сессии (с row-level блокировкой от гонок INSERT)
@@ -817,7 +833,7 @@ async def get_account_fields(account_id: uuid.UUID):
                     field_type=af.get("type", "text"),
                     entity_type=entity,
                     is_enabled=False,
-                    ai_hint=f"Значение поля {af['name']}",
+                    ai_hint=af.get("default_hint") or f"Значение поля {af['name']}",
                     overwrite_if_filled=False
                 )
                 session.add(new_fm)
