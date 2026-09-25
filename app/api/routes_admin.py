@@ -412,17 +412,45 @@ ADMIN_HTML = """<!DOCTYPE html>
 
       <!-- Tab 2: Pipelines -->
       <div x-show="activeTab === 'pipelines'" class="space-y-4 flex-1 overflow-y-auto pr-1">
-        <p class="text-xs text-slate-400">Отметьте воронки, в которых ИИ-менеджер должен автоматически отвечать клиентам:</p>
-        <div class="space-y-2">
+        <div class="flex items-center justify-between">
+          <p class="text-xs text-slate-400">Отметьте воронки и этапы, на которых ИИ-менеджер отвечает клиентам (авто-движение сделок: 0 → 1 → 2 → 3 → 4):</p>
+          <button @click="savePipelines()" class="px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-600/20">
+            <i class="fa-solid fa-floppy-disk mr-1"></i> Сохранить воронки и этапы
+          </button>
+        </div>
+        <div class="space-y-3">
           <template x-for="p in pipelines" :key="p.amo_pipeline_id">
-            <label class="flex items-center space-x-3 p-3 bg-slate-800/60 rounded-xl border border-slate-700 hover:border-slate-600 cursor-pointer" :class="p.is_deleted_in_amo ? 'opacity-60 border-rose-900/40' : ''">
-              <input type="checkbox" :checked="p.is_enabled" :disabled="p.is_deleted_in_amo" @change="p.is_enabled = $event.target.checked" class="rounded text-indigo-600 focus:ring-indigo-500 w-4 h-4 bg-slate-700 disabled:opacity-40">
-              <div class="text-sm font-medium" :class="p.is_deleted_in_amo ? 'text-slate-400 line-through' : 'text-white'" x-text="p.name"></div>
-              <span x-show="p.is_deleted_in_amo" class="text-[10px] font-semibold px-2 py-0.5 rounded bg-rose-900/60 text-rose-300 border border-rose-700/50">
-                <i class="fa-solid fa-triangle-exclamation mr-0.5"></i> Удалена в amoCRM
-              </span>
-              <div class="text-xs text-slate-500 ml-auto" x-text="'ID: ' + p.amo_pipeline_id"></div>
-            </label>
+            <div class="p-3.5 bg-slate-800/60 rounded-xl border border-slate-700 space-y-3" :class="p.is_deleted_in_amo ? 'opacity-60 border-rose-900/40' : ''">
+              <label class="flex items-center space-x-3 cursor-pointer">
+                <input type="checkbox" :checked="p.is_enabled" :disabled="p.is_deleted_in_amo" @change="p.is_enabled = $event.target.checked" class="rounded text-indigo-600 focus:ring-indigo-500 w-4 h-4 bg-slate-700 disabled:opacity-40">
+                <div class="text-sm font-semibold" :class="p.is_deleted_in_amo ? 'text-slate-400 line-through' : 'text-white'" x-text="p.name"></div>
+                <span x-show="p.is_deleted_in_amo" class="text-[10px] font-semibold px-2 py-0.5 rounded bg-rose-900/60 text-rose-300 border border-rose-700/50">
+                  <i class="fa-solid fa-triangle-exclamation mr-0.5"></i> Удалена в amoCRM
+                </span>
+                <div class="text-xs text-slate-500 ml-auto" x-text="'ID: ' + p.amo_pipeline_id"></div>
+              </label>
+
+              <!-- Список этапов воронки с выбором, где отвечает ИИ -->
+              <div x-show="p.is_enabled && p.stages && p.stages.length > 0" class="pl-6 pt-2 border-t border-slate-700/70 space-y-1.5">
+                <div class="text-[11px] text-slate-400 mb-1 font-medium">Активные этапы для ответов ИИ (снимите галочку с этапа, где работает живой менеджер):</div>
+                <template x-for="(st, idx) in (p.stages || [])" :key="st.id">
+                  <label class="flex items-center justify-between px-3 py-1.5 rounded-lg bg-slate-900/60 border border-slate-800 hover:border-slate-700 cursor-pointer">
+                    <div class="flex items-center space-x-2.5">
+                      <input type="checkbox" :checked="(p.enabled_stage_ids || []).includes(st.id)"
+                             @change="toggleStage(p, st.id, $event.target.checked)"
+                             class="rounded text-indigo-600 w-3.5 h-3.5 bg-slate-700">
+                      <span class="text-xs text-slate-200 font-medium" x-text="st.name"></span>
+                      <span x-show="idx === 0" class="text-[10px] px-1.5 py-0.5 rounded bg-slate-700/80 text-slate-300 border border-slate-600">Этап 0: Старт</span>
+                      <span x-show="idx === 1" class="text-[10px] px-1.5 py-0.5 rounded bg-sky-950/80 text-sky-300 border border-sky-800/60">Этап 1: Контакты</span>
+                      <span x-show="idx === 2" class="text-[10px] px-1.5 py-0.5 rounded bg-violet-950/80 text-violet-300 border border-violet-800/60">Этап 2: Сделка</span>
+                      <span x-show="idx === 3" class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-950/80 text-emerald-300 border border-emerald-800/60">Этап 3: Все поля готовы</span>
+                      <span x-show="idx === 4" class="text-[10px] px-1.5 py-0.5 rounded bg-amber-950/80 text-amber-300 border border-amber-800/60">Этап 4: Handover</span>
+                    </div>
+                    <span class="text-[10px] text-slate-500" x-text="'status_id: ' + st.id"></span>
+                  </label>
+                </template>
+              </div>
+            </div>
           </template>
         </div>
       </div>
@@ -848,22 +876,46 @@ ADMIN_HTML = """<!DOCTYPE html>
             await this.fetchAccounts();
           }
         },
+        toggleStage(pipe, stageId, checked) {
+          if (!Array.isArray(pipe.enabled_stage_ids)) {
+            pipe.enabled_stage_ids = [];
+          }
+          if (checked) {
+            if (!pipe.enabled_stage_ids.includes(stageId)) {
+              pipe.enabled_stage_ids.push(stageId);
+            }
+          } else {
+            pipe.enabled_stage_ids = pipe.enabled_stage_ids.filter(id => id !== stageId);
+          }
+        },
         async loadPipelines() {
           try {
             const res = await this.apiFetch(`/accounts/${this.selectedAccount.id}/pipelines`);
-            this.pipelines = await res.json();
+            const data = await res.json();
+            this.pipelines = Array.isArray(data) ? data.map(p => ({
+              ...p,
+              stages: Array.isArray(p.stages) ? p.stages : [],
+              enabled_stage_ids: Array.isArray(p.enabled_stage_ids) ? p.enabled_stage_ids : []
+            })) : [];
           } catch (e) {}
         },
         async savePipelines() {
           try {
             const enabledIds = this.pipelines.filter(p => p.is_enabled).map(p => p.amo_pipeline_id);
+            const stagesByPipe = {};
+            for (const p of this.pipelines) {
+              stagesByPipe[String(p.amo_pipeline_id)] = Array.isArray(p.enabled_stage_ids) ? p.enabled_stage_ids : [];
+            }
             const res = await this.apiFetch(`/accounts/${this.selectedAccount.id}/pipelines`, {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ enabled_amo_pipeline_ids: enabledIds })
+              body: JSON.stringify({
+                enabled_amo_pipeline_ids: enabledIds,
+                enabled_stages_by_pipeline: stagesByPipe
+              })
             });
             if (res.ok) {
-              this.showToast('Воронки успешно сохранены!');
+              this.showToast('Воронки и активные этапы ИИ успешно сохранены!');
             }
           } catch (e) {
             this.showToast('Ошибка сохранения воронок', 'error');

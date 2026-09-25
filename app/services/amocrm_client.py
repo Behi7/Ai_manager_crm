@@ -245,11 +245,22 @@ class AmoCRMClient:
                 pipelines = data.get("_embedded", {}).get("pipelines", [])
                 result = []
                 for p in pipelines:
-                    statuses = p.get("_embedded", {}).get("statuses", [])
+                    raw_statuses = p.get("_embedded", {}).get("statuses", [])
+                    work_statuses = [
+                        {
+                            "id": int(s.get("id")),
+                            "name": s.get("name") or f"Этап {s.get('id')}",
+                            "sort": int(s.get("sort") or 0),
+                            "color": s.get("color") or "#cbd5e1",
+                        }
+                        for s in raw_statuses
+                        if s.get("id") and s.get("type") != 1 and int(s.get("id")) not in (142, 143)
+                    ]
+                    work_statuses.sort(key=lambda x: x["sort"])
                     result.append({
                         "id": p.get("id"),
                         "name": p.get("name"),
-                        "statuses": [{"id": s.get("id"), "name": s.get("name")} for s in statuses]
+                        "statuses": work_statuses
                     })
                 return result
             return []
@@ -457,6 +468,40 @@ class AmoCRMClient:
             raise
         except (httpx.RequestError, httpx.TimeoutException) as net_err:
             logger.error(f"Сетевая ошибка в run_salesbot (bot={bot_id}, {subdomain}): {net_err}")
+            return False
+
+    async def patch_lead_status(
+        self,
+        subdomain: str,
+        access_token: str,
+        lead_id: int,
+        status_id: int,
+        pipeline_id: Optional[int] = None,
+    ) -> bool:
+        """
+        Перевод сделки на указанный этап (status_id) в amoCRM.
+        PATCH /api/v4/leads/{lead_id}
+        """
+        await self.rate_limiter.wait(subdomain)
+        url = f"{self._base_url(subdomain)}/api/v4/leads/{lead_id}"
+        payload: Dict[str, Any] = {"status_id": int(status_id)}
+        if pipeline_id:
+            payload["pipeline_id"] = int(pipeline_id)
+        try:
+            client = await self.get_client()
+            resp = await client.patch(url, json=payload, headers=self._headers(access_token))
+            self._check_http_auth_or_billing(resp, subdomain)
+            if resp.status_code == 200:
+                logger.info(f"✅ Сделка #{lead_id} переведена на этап status_id={status_id} ({subdomain})")
+                return True
+            logger.warning(
+                f"Ошибка перевода сделки #{lead_id} на этап {status_id}: HTTP {resp.status_code} {resp.text[:200]}"
+            )
+            return False
+        except AmoCRMAuthOrBillingError:
+            raise
+        except Exception as e:
+            logger.warning(f"Сетевая ошибка patch_lead_status (#{lead_id} -> {status_id}): {e}")
             return False
 
     async def create_operator_task(

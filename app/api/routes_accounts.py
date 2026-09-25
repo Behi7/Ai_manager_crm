@@ -18,6 +18,13 @@ from app.services.debounce_service import debounce_service
 
 logger = logging.getLogger("AccountsRouter")
 
+def _default_enabled_stages(stages: list, current_enabled: Optional[list]) -> List[int]:
+    valid_ids = [int(s["id"]) for s in (stages or []) if isinstance(s, dict) and s.get("id")]
+    if current_enabled is None:
+        return valid_ids[:4]
+    valid_set = set(valid_ids)
+    return [int(sid) for sid in current_enabled if int(sid) in valid_set]
+
 def _norm_entity(val) -> str:
     return val if isinstance(val, str) and val in ("lead", "contact") else "lead"
 
@@ -42,6 +49,9 @@ class TestConnectionRequest(BaseModel):
 
 class UpdatePipelinesRequest(BaseModel):
     enabled_amo_pipeline_ids: List[int] = Field(..., description="Список ID воронок amoCRM, в которых активен ИИ")
+    enabled_stages_by_pipeline: Optional[Dict[str, List[int]]] = Field(
+        None, description="Карта {amo_pipeline_id: [status_id, ...]} разрешённых этапов для ответов ИИ"
+    )
 
 
 class FieldMappingUpdate(BaseModel):
@@ -642,15 +652,23 @@ async def get_account_pipelines(account_id: uuid.UUID):
         amo_pipeline_ids = set()
         for ap in amo_pipelines:
             ap_id = ap["id"]
+            ap_stages = ap.get("statuses") or []
             amo_pipeline_ids.add(ap_id)
             if ap_id in existing_map:
                 existing_map[ap_id].name = ap["name"]
+                existing_map[ap_id].stages_json = ap_stages
+                cur_en = getattr(existing_map[ap_id], "enabled_stage_ids", None)
+                existing_map[ap_id].enabled_stage_ids = _default_enabled_stages(
+                    ap_stages, cur_en if isinstance(cur_en, list) else None
+                )
             else:
                 new_p = Pipeline(
                     account_id=account.id,
                     amo_pipeline_id=ap_id,
                     name=ap["name"],
-                    is_enabled=False
+                    is_enabled=False,
+                    stages_json=ap_stages,
+                    enabled_stage_ids=_default_enabled_stages(ap_stages, None),
                 )
                 session.add(new_p)
 
@@ -672,6 +690,14 @@ async def get_account_pipelines(account_id: uuid.UUID):
                 "amo_pipeline_id": p.amo_pipeline_id,
                 "name": p.name,
                 "is_enabled": p.is_enabled,
+                "stages": (p.stages_json if isinstance(getattr(p, "stages_json", None), list) else []),
+                "enabled_stage_ids": (
+                    p.enabled_stage_ids
+                    if isinstance(getattr(p, "enabled_stage_ids", None), list)
+                    else _default_enabled_stages(
+                        p.stages_json if isinstance(getattr(p, "stages_json", None), list) else [], None
+                    )
+                ),
                 "is_deleted_in_amo": p.amo_pipeline_id not in amo_pipeline_ids
             }
             for p in all_pipelines
@@ -688,8 +714,16 @@ async def update_account_pipelines(account_id: uuid.UUID, payload: UpdatePipelin
             raise HTTPException(status_code=404, detail="Воронки не найдены. Сначала выполните GET /pipelines")
 
         enabled_set = set(payload.enabled_amo_pipeline_ids)
+        stages_map = payload.enabled_stages_by_pipeline or {}
         for p in pipelines:
             p.is_enabled = (p.amo_pipeline_id in enabled_set)
+            pid_str = str(p.amo_pipeline_id)
+            if pid_str in stages_map and isinstance(stages_map[pid_str], list):
+                p.enabled_stage_ids = [int(sid) for sid in stages_map[pid_str]]
+            elif p.is_enabled and not isinstance(getattr(p, "enabled_stage_ids", None), list):
+                p.enabled_stage_ids = _default_enabled_stages(
+                    p.stages_json if isinstance(getattr(p, "stages_json", None), list) else [], None
+                )
 
         acc_stmt = select(Account).where(Account.id == account_id).with_for_update()
         account = (await session.execute(acc_stmt)).scalar_one_or_none()
@@ -1067,15 +1101,23 @@ async def sync_account_with_amocrm(account_id: uuid.UUID):
             amo_pipeline_ids = set()
             for ap in amo_pipelines:
                 ap_id = ap["id"]
+                ap_stages = ap.get("statuses") or []
                 amo_pipeline_ids.add(ap_id)
                 if ap_id in existing_pipelines:
                     existing_pipelines[ap_id].name = ap["name"]
+                    existing_pipelines[ap_id].stages_json = ap_stages
+                    cur_en = getattr(existing_pipelines[ap_id], "enabled_stage_ids", None)
+                    existing_pipelines[ap_id].enabled_stage_ids = _default_enabled_stages(
+                        ap_stages, cur_en if isinstance(cur_en, list) else None
+                    )
                 else:
                     new_p = Pipeline(
                         account_id=account.id,
                         amo_pipeline_id=ap_id,
                         name=ap["name"],
-                        is_enabled=False
+                        is_enabled=False,
+                        stages_json=ap_stages,
+                        enabled_stage_ids=_default_enabled_stages(ap_stages, None),
                     )
                     session.add(new_p)
 

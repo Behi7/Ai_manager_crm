@@ -314,6 +314,14 @@ class DeliveryService:
                     except Exception as e:
                         logger.warning(f"Не удалось загрузить контакт #{contact_id}: {e}")
 
+        active_pipeline = None
+        if lead_amo_data and getattr(account, "pipelines", None):
+            lead_pipeline_id = lead_amo_data.get("pipeline_id")
+            for p_obj in (account.pipelines or []):
+                if getattr(p_obj, "amo_pipeline_id", None) == lead_pipeline_id:
+                    active_pipeline = p_obj
+                    break
+
         if enabled_pipeline_ids and lead_amo_data:
             lead_pipeline_id = lead_amo_data.get("pipeline_id")
             if lead_pipeline_id and lead_pipeline_id not in enabled_pipeline_ids:
@@ -322,6 +330,21 @@ class DeliveryService:
                     f"которая не включена в настройках аккаунта ({enabled_pipeline_ids}). ИИ пропускает сообщение."
                 )
                 return
+
+            # Проверка: разрешено ли ИИ отвечать на текущем этапе (status_id) данной воронки
+            lead_status_id = lead_amo_data.get("status_id")
+            if active_pipeline and lead_status_id:
+                p_stages = getattr(active_pipeline, "stages_json", None)
+                p_enabled_stages = getattr(active_pipeline, "enabled_stage_ids", None)
+                if isinstance(p_stages, list) and p_stages and isinstance(p_enabled_stages, list):
+                    all_work_stage_ids = {int(s["id"]) for s in p_stages if isinstance(s, dict) and s.get("id")}
+                    enabled_stage_set = {int(sid) for sid in p_enabled_stages}
+                    if (int(lead_status_id) in all_work_stage_ids or int(lead_status_id) in (142, 143)) and int(lead_status_id) not in enabled_stage_set:
+                        logger.info(
+                            f"Лид #{amo_lead_id} находится на этапе #{lead_status_id} воронки '{getattr(active_pipeline, 'name', '')}', "
+                            f"где ответы ИИ отключены ({list(enabled_stage_set)}). ИИ пропускает сообщение."
+                        )
+                        return
 
         # 3. Короткая сессия БД №1: Чтение/создание лида, запись сообщения пользователя и чтение истории
         async with self._session_scope(session) as db:
@@ -530,6 +553,21 @@ class DeliveryService:
                 if comm_resp.is_handover_requested
                 else f"ИИ не может решить вопрос клиента после {current_stuck_count} попыток. Подключитесь к диалогу."
             )
+            # Перевод сделки на 4-й этап (индекс 4 — Handover / Требуется менеджер), если этапы синхронизированы
+            if active_pipeline:
+                p_stages = getattr(active_pipeline, "stages_json", None)
+                if isinstance(p_stages, list) and p_stages:
+                    handover_idx = min(4, len(p_stages) - 1)
+                    target_status_id = int(p_stages[handover_idx]["id"])
+                    cur_status_id = int((lead_amo_data or {}).get("status_id") or 0)
+                    if cur_status_id != target_status_id:
+                        await amocrm_client.patch_lead_status(
+                            subdomain=subdomain,
+                            access_token=access_token,
+                            lead_id=amo_lead_id,
+                            status_id=target_status_id,
+                        )
+
             await amocrm_client.create_operator_task(
                 subdomain=subdomain,
                 access_token=access_token,
@@ -661,6 +699,8 @@ class DeliveryService:
                 media_parts=media_parts,
                 contact_id=contact_id,
                 contact_amo_data=contact_amo_data,
+                active_pipeline=active_pipeline,
+                lead_amo_data=lead_amo_data,
             )
         except BaseException as ext_err:
             logger.error(f"Ошибка/таймаут на этапе работы Экстрактора для лида {amo_lead_id} (ответ клиенту уже доставлен): {ext_err}")
@@ -683,8 +723,12 @@ class DeliveryService:
         media_parts,
         contact_id,
         contact_amo_data,
+        active_pipeline=None,
+        lead_amo_data=None,
     ):
         enabled_mappings = [fm for fm in (account.field_mappings or []) if fm.is_enabled]
+        extracted_items: List[Dict[str, Any]] = []
+        disabled_field_keys: set = set()
         if enabled_mappings:
             full_dialog = history_payload + [{"role": "assistant", "content": reply_text}]
             ext_model = ai_config.extractor_model if ai_config else "gemini-3.1-flash-lite"
@@ -698,8 +742,8 @@ class DeliveryService:
                 media_parts=media_parts
             )
 
-            disabled_field_keys = set()
             if ext_result.fields_to_update:
+                extracted_items = list(ext_result.fields_to_update)
                 logger.info(f"Экстрактор нашел поля для лида {amo_lead_id}: {ext_result.field_name_values}")
 
                 fm_entity_map = {fm.amo_field_id: (fm.entity_type if isinstance(getattr(fm, "entity_type", None), str) and fm.entity_type in ("lead", "contact") else "lead") for fm in account.field_mappings}
@@ -810,6 +854,84 @@ class DeliveryService:
                         lead_obj.stuck_count = (lead_obj.stuck_count or 0) + 1
                     lead.stuck_count = current_stuck_count + 1
                     await db.commit()
+
+        # 10. Автоматическое продвижение сделки по этапам воронки (0 -> 1 -> 2 -> 3) БЕЗ отключения ИИ на 3-м этапе
+        if active_pipeline and lead_amo_data:
+            p_stages = getattr(active_pipeline, "stages_json", None)
+            if isinstance(p_stages, list) and p_stages:
+                filled_keys = set()
+                for k, v in (amo_cf_values or {}).items():
+                    if isinstance(k, tuple) and len(k) == 2 and str(v or "").strip():
+                        filled_keys.add((str(k[0]), int(k[1])))
+
+                fm_id_to_ent = {
+                    fm.amo_field_id: (
+                        fm.entity_type
+                        if isinstance(getattr(fm, "entity_type", None), str) and fm.entity_type in ("lead", "contact")
+                        else "lead"
+                    )
+                    for fm in enabled_mappings
+                }
+                for item in extracted_items:
+                    fid = item.get("field_id")
+                    vals = item.get("values") or []
+                    val_str = str((vals[0] or {}).get("value") or "").strip() if vals else ""
+                    if fid and val_str:
+                        ent = item.get("entity_type") or fm_id_to_ent.get(fid, "lead")
+                        if (ent, int(fid)) not in disabled_field_keys:
+                            filled_keys.add((ent, int(fid)))
+
+                reply_fid = getattr(account, "ai_reply_field_id", None)
+                active_fms = [
+                    fm for fm in enabled_mappings
+                    if fm.is_enabled and fm.amo_field_id != reply_fid
+                ]
+                contact_fms = [
+                    fm for fm in active_fms
+                    if (fm.entity_type if isinstance(getattr(fm, "entity_type", None), str) and fm.entity_type in ("lead", "contact") else "lead") == "contact"
+                ]
+                lead_fms = [
+                    fm for fm in active_fms
+                    if (fm.entity_type if isinstance(getattr(fm, "entity_type", None), str) and fm.entity_type in ("lead", "contact") else "lead") == "lead"
+                ]
+
+                has_contact_group = len(contact_fms) > 0
+                has_lead_group = len(lead_fms) > 0
+                contact_ready = has_contact_group and all(("contact", int(fm.amo_field_id)) in filled_keys for fm in contact_fms)
+                lead_ready = has_lead_group and all(("lead", int(fm.amo_field_id)) in filled_keys for fm in lead_fms)
+
+                if (
+                    (has_contact_group and has_lead_group and contact_ready and lead_ready)
+                    or (has_contact_group and not has_lead_group and contact_ready)
+                    or (has_lead_group and not has_contact_group and lead_ready)
+                ):
+                    target_idx = 3  # Этап 3: Все поля (Контакты + Сделка) готовы
+                elif lead_ready:
+                    target_idx = 2  # Этап 2: Все поля сделки заполнены
+                elif contact_ready:
+                    target_idx = 1  # Этап 1: Контакты заполнены
+                else:
+                    target_idx = 0  # Этап 0: Стартовый рабочий этап
+
+                bounded_idx = min(target_idx, len(p_stages) - 1)
+                cur_status_id = int(lead_amo_data.get("status_id") or 0)
+                cur_idx = next(
+                    (idx for idx, s in enumerate(p_stages) if isinstance(s, dict) and int(s.get("id") or 0) == cur_status_id),
+                    -1,
+                )
+                # Двигаем только вперёд (или из Неразобранного cur_idx == -1 в рабочий этап)
+                if cur_idx < bounded_idx:
+                    new_status_id = int(p_stages[bounded_idx]["id"])
+                    stage_title = p_stages[bounded_idx].get("name", "")
+                    await amocrm_client.patch_lead_status(
+                        subdomain=subdomain,
+                        access_token=access_token,
+                        lead_id=amo_lead_id,
+                        status_id=new_status_id,
+                    )
+                    logger.info(
+                        f"📈 Авто-переход лида #{amo_lead_id} на этап [{bounded_idx}] '{stage_title}' (status_id={new_status_id})"
+                    )
 
 
 delivery_service = DeliveryService()

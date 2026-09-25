@@ -80,6 +80,8 @@ class Pipeline(Base):
     amo_pipeline_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    stages_json: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True, default=list)
+    enabled_stage_ids: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True, default=None)
     synced_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )
