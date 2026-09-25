@@ -71,7 +71,7 @@ ADMIN_HTML = """<!DOCTYPE html>
     </div>
 
     <!-- Notifications banner / toast -->
-    <div x-show="toast.show" x-transition x-cloak class="fixed bottom-6 right-6 z-50 max-w-md px-4 py-3 rounded-xl shadow-2xl flex items-center space-x-3 border"
+    <div x-show="toast.show" x-transition x-cloak style="z-index: 9999;" class="fixed bottom-6 right-6 z-[9999] max-w-md px-4 py-3 rounded-xl shadow-2xl flex items-center space-x-3 border"
          :class="toast.type === 'error' ? 'bg-red-950/90 border-red-800 text-red-200' : 'bg-emerald-950/90 border-emerald-800 text-emerald-200'">
       <i class="fa-solid" :class="toast.type === 'error' ? 'fa-circle-exclamation' : 'fa-circle-check'"></i>
       <span class="text-sm font-medium" x-text="toast.message"></span>
