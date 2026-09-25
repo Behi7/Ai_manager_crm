@@ -17,7 +17,9 @@ class DebounceService:
         self._background_tasks: set[asyncio.Task] = set()
 
     async def get_redis(self) -> aioredis.Redis:
-        if self.redis is None:
+        current_loop = asyncio.get_running_loop()
+        if self.redis is None or (isinstance(self.redis, aioredis.Redis) and getattr(self, "_redis_loop", None) is not current_loop):
+            self._redis_loop = current_loop
             self.redis = aioredis.from_url(
                 settings.REDIS_URL,
                 decode_responses=True,
