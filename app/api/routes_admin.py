@@ -412,12 +412,7 @@ ADMIN_HTML = """<!DOCTYPE html>
 
       <!-- Tab 2: Pipelines -->
       <div x-show="activeTab === 'pipelines'" class="space-y-4 flex-1 overflow-y-auto pr-1">
-        <div class="flex items-center justify-between">
-          <p class="text-xs text-slate-400">Отметьте воронки и этапы, на которых ИИ-менеджер отвечает клиентам (авто-движение сделок: 0 → 1 → 2 → 3 → 4):</p>
-          <button @click="savePipelines()" class="px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-600/20">
-            <i class="fa-solid fa-floppy-disk mr-1"></i> Сохранить воронки и этапы
-          </button>
-        </div>
+        <p class="text-xs text-slate-400">Отметьте воронки и этапы, на которых ИИ-менеджер отвечает клиентам (авто-движение сделок: 0 → 1 → 2 → 3 → 4):</p>
         <div class="space-y-3">
           <template x-for="p in pipelines" :key="p.amo_pipeline_id">
             <div class="p-3.5 bg-slate-800/60 rounded-xl border border-slate-700 space-y-3" :class="p.is_deleted_in_amo ? 'opacity-60 border-rose-900/40' : ''">
