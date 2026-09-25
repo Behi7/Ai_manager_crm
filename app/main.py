@@ -28,6 +28,7 @@ async def lifespan(app: FastAPI):
         async with engine.begin() as conn:
             await conn.execute(text("ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS stages_json JSONB DEFAULT '[]'::jsonb;"))
             await conn.execute(text("ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS enabled_stage_ids JSONB DEFAULT NULL;"))
+            await conn.execute(text("ALTER TABLE ai_configs ADD COLUMN IF NOT EXISTS debounce_delay_seconds NUMERIC(4, 1) DEFAULT 2.5 NOT NULL;"))
             await conn.execute(text("""
                 DO $$
                 BEGIN
