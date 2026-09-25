@@ -184,16 +184,23 @@ async def handle_salesbot_legacy_webhook(request: Request):
 
 
 async def _verify_account_if_needed(account_uuid: uuid.UUID):
-    """Авто-верификация аккаунта при первом входящем сообщении"""
+    """Авто-верификация аккаунта при первом входящем сообщении и прогрев кэша паузы дебаунса"""
     try:
         async with AsyncSessionLocal() as session:
             acc_stmt = select(Account).where(Account.id == account_uuid)
             acc = (await session.execute(acc_stmt)).scalar_one_or_none()
-            if acc and not acc.webhook_verified:
-                acc.webhook_verified = True
-                acc.status = AccountStatus.VERIFIED
-                await session.commit()
-                logger.info(f"Аккаунт {account_uuid} успешно верифицирован первым входящим сообщением!")
+            if acc:
+                if acc.ai_config and getattr(acc.ai_config, "debounce_delay_seconds", None) is not None:
+                    try:
+                        r = await debounce_service.get_redis()
+                        await r.set(f"debounce_delay:{account_uuid}", str(float(acc.ai_config.debounce_delay_seconds)))
+                    except Exception:
+                        pass
+                if not acc.webhook_verified:
+                    acc.webhook_verified = True
+                    acc.status = AccountStatus.VERIFIED
+                    await session.commit()
+                    logger.info(f"Аккаунт {account_uuid} успешно верифицирован первым входящим сообщением!")
     except Exception as err:
         logger.error(f"Ошибка авто-верификации аккаунта {account_uuid}: {err}")
 
@@ -281,14 +288,24 @@ async def handle_amocrm_webhook(
             pass
         raise
 
-    # Запустить таймер дебаунса (2.5 сек)
+    # Запустить таймер дебаунса (из настроек аккаунта в Админ-панели, по умолчанию 2.5 сек)
+    delay_sec = 2.5
+    try:
+        cached_delay = await r_redis.get(f"debounce_delay:{account_uuid}")
+        if isinstance(cached_delay, (str, bytes)) and cached_delay:
+            val = float(cached_delay.decode("utf-8") if isinstance(cached_delay, bytes) else cached_delay)
+            if 0.5 <= val <= 60.0:
+                delay_sec = val
+    except Exception:
+        delay_sec = 2.5
+
     debounce_service.schedule_debounce(
         account_id=str(account_uuid),
         lead_id=lead_id,
         callback=delivery_service.process_lead_after_debounce,
-        delay=2.5
+        delay=delay_sec
     )
 
-    logger.info(f"Сообщение {msg['id']} лида {lead_id} принято в обработку (дебаунс 2.5с)")
+    logger.info(f"Сообщение {msg['id']} лида {lead_id} принято в обработку (дебаунс {delay_sec}с)")
     return {"status": "ok"}
 

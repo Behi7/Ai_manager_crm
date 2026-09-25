@@ -74,6 +74,7 @@ class UpdateAIConfigRequest(BaseModel):
     fallback_extractor_model: Optional[str] = None
     temperature: Optional[float] = None
     handover_after_stuck: Optional[int] = None
+    debounce_delay_seconds: Optional[float] = Field(None, ge=0.5, le=60.0)
     knowledge_base: Optional[str] = None
     knowledge_mode: Optional[str] = None
     comment_prompt: Optional[str] = None
@@ -921,6 +922,7 @@ async def get_ai_config(account_id: uuid.UUID):
             "fallback_extractor_model": cfg.fallback_extractor_model or "gemini-2.5-flash",
             "temperature": float(cfg.temperature),
             "handover_after_stuck": cfg.handover_after_stuck,
+            "debounce_delay_seconds": float(getattr(cfg, "debounce_delay_seconds", None) or 2.5),
             "knowledge_base": cfg.knowledge_base or "",
             "knowledge_mode": cfg.knowledge_mode or "plain_text",
             "gemini_cache_name": cfg.gemini_cache_name,
@@ -959,6 +961,8 @@ async def update_ai_config(account_id: uuid.UUID, payload: UpdateAIConfigRequest
             cfg.temperature = payload.temperature
         if payload.handover_after_stuck is not None:
             cfg.handover_after_stuck = payload.handover_after_stuck
+        if payload.debounce_delay_seconds is not None:
+            cfg.debounce_delay_seconds = float(payload.debounce_delay_seconds)
         if payload.knowledge_base is not None:
             if cfg.knowledge_base != payload.knowledge_base:
                 cfg.gemini_cache_name = None
@@ -971,7 +975,13 @@ async def update_ai_config(account_id: uuid.UUID, payload: UpdateAIConfigRequest
         if payload.direct_link is not None:
             cfg.direct_link = payload.direct_link.strip() if payload.direct_link.strip() else None
 
+        saved_delay = float(getattr(cfg, "debounce_delay_seconds", None) or 2.5)
         await session.commit()
+        try:
+            r_redis = await debounce_service.get_redis()
+            await r_redis.set(f"debounce_delay:{account_id}", str(saved_delay))
+        except Exception:
+            pass
         return {"success": True, "message": "Настройки ИИ успешно обновлены"}
 
 

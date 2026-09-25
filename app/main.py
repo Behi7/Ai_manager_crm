@@ -25,11 +25,12 @@ async def lifespan(app: FastAPI):
     logger.info("Инициализация AI Manager Backend...")
     # Проверка подключения к БД (Fail-fast, IMPORTANT-07)
     try:
-        async with engine.begin() as conn:
-            await conn.execute(text("ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS stages_json JSONB DEFAULT '[]'::jsonb;"))
-            await conn.execute(text("ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS enabled_stage_ids JSONB DEFAULT NULL;"))
-            await conn.execute(text("ALTER TABLE ai_configs ADD COLUMN IF NOT EXISTS debounce_delay_seconds NUMERIC(4, 1) DEFAULT 2.5 NOT NULL;"))
-            await conn.execute(text("""
+        async with AsyncSessionLocal() as session:
+            await session.execute(text("SELECT 1"))
+            await session.execute(text("ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS stages_json JSONB DEFAULT '[]'::jsonb;"))
+            await session.execute(text("ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS enabled_stage_ids JSONB DEFAULT NULL;"))
+            await session.execute(text("ALTER TABLE ai_configs ADD COLUMN IF NOT EXISTS debounce_delay_seconds NUMERIC(4, 1) DEFAULT 2.5 NOT NULL;"))
+            await session.execute(text("""
                 DO $$
                 BEGIN
                     IF EXISTS (
@@ -41,6 +42,7 @@ async def lifespan(app: FastAPI):
                     END IF;
                 END $$;
             """))
+            await session.commit()
         logger.info("Подключение к PostgreSQL и проверка схемы успешны.")
     except Exception as e:
         logger.critical(f"Критическая ошибка подключения к PostgreSQL при запуске: {e}")

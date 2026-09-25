@@ -592,7 +592,12 @@ ADMIN_HTML = """<!DOCTYPE html>
             <div class="text-[10px] text-slate-400 mt-0.5">Включается при сбое/перегрузке для извлечения полей</div>
           </div>
         </div>
-        <div class="grid grid-cols-2 gap-3">
+        <div class="grid grid-cols-3 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-slate-300 mb-1">Пауза перед ответом (сек)</label>
+            <input type="number" step="0.5" min="0.5" max="60" x-model="aiConfig.debounce_delay_seconds" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
+            <div class="text-[10px] text-slate-400 mt-0.5">Ожидание серии сообщений клиента (по умолч. 2.5с)</div>
+          </div>
           <div>
             <label class="block text-xs font-medium text-slate-300 mb-1">Температура генерации (0.0 - 1.0)</label>
             <input type="number" step="0.1" min="0" max="1" x-model="aiConfig.temperature" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
@@ -643,6 +648,7 @@ ADMIN_HTML = """<!DOCTYPE html>
           fallback_extractor_model: 'gemini-2.5-flash',
           temperature: 0.4,
           handover_after_stuck: 4,
+          debounce_delay_seconds: 2.5,
           knowledge_base: '',
           knowledge_mode: 'plain_text',
           comment_prompt: DEFAULT_COMMENT_PROMPT_TEXT,
@@ -974,6 +980,7 @@ ADMIN_HTML = """<!DOCTYPE html>
             if (!data.fallback_extractor_model) data.fallback_extractor_model = 'gemini-2.5-flash';
             if (!data.comment_prompt) data.comment_prompt = DEFAULT_COMMENT_PROMPT_TEXT;
             if (!data.direct_link) data.direct_link = '';
+            if (!data.debounce_delay_seconds) data.debounce_delay_seconds = 2.5;
             this.aiConfig = data;
           } catch (e) {
             console.error('Ошибка загрузки настроек ИИ:', e);
