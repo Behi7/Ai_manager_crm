@@ -497,6 +497,42 @@ ADMIN_HTML = """<!DOCTYPE html>
 
       <!-- Tab 4: AI Config -->
       <div x-show="activeTab === 'ai'" class="space-y-4 flex-1 overflow-y-auto pr-1">
+        <!-- Секция: Google AI Studio (Gemini API Key аккаунта) -->
+        <div class="p-3.5 bg-slate-800/90 border border-indigo-500/40 rounded-xl space-y-2">
+          <div class="flex items-center justify-between">
+            <label class="text-xs font-semibold text-indigo-300 flex items-center gap-1.5">
+              <i class="fa-solid fa-key text-indigo-400"></i> Google AI Studio (Gemini API Key аккаунта)
+            </label>
+            <div>
+              <span x-show="aiConfig.gemini_api_key && aiConfig.gemini_api_key.trim().length > 0"
+                    class="px-2 py-0.5 bg-emerald-950/80 border border-emerald-700/60 text-emerald-300 rounded-md text-[10px] font-medium">
+                <i class="fa-solid fa-check-circle mr-1"></i>Индивидуальный ключ задан
+              </span>
+              <span x-show="(!aiConfig.gemini_api_key || !aiConfig.gemini_api_key.trim()) && aiConfig.has_fallback_env_key"
+                    class="px-2 py-0.5 bg-amber-950/80 border border-amber-700/60 text-amber-300 rounded-md text-[10px] font-medium">
+                <i class="fa-solid fa-triangle-exclamation mr-1"></i>Используется общий ключ из .env
+              </span>
+              <span x-show="(!aiConfig.gemini_api_key || !aiConfig.gemini_api_key.trim()) && !aiConfig.has_fallback_env_key"
+                    class="px-2 py-0.5 bg-red-950/80 border border-red-700/60 text-red-300 rounded-md text-[10px] font-medium">
+                <i class="fa-solid fa-circle-xmark mr-1"></i>Ключ не задан
+              </span>
+            </div>
+          </div>
+          <div class="relative flex items-center">
+            <input :type="showGeminiKey ? 'text' : 'password'"
+                   x-model="aiConfig.gemini_api_key"
+                   placeholder="AIzaSy... (вставьте API-ключ из проекта Google AI Studio для этого клиента)"
+                   class="w-full bg-slate-900 border border-slate-700 rounded-xl pl-3 pr-10 py-2 text-xs font-mono text-white outline-none focus:border-indigo-500">
+            <button type="button" @click="showGeminiKey = !showGeminiKey"
+                    class="absolute right-2.5 text-slate-400 hover:text-slate-200 text-xs">
+              <i class="fa-solid" :class="showGeminiKey ? 'fa-eye-slash' : 'fa-eye'"></i>
+            </button>
+          </div>
+          <div class="text-[10px] text-slate-400">
+            У каждого клиента может быть свой проект в Google AI Studio для раздельного учёта квот и расходов.
+          </div>
+        </div>
+
         <div>
           <label class="block text-xs font-medium text-slate-300 mb-1">Системный промпт Общителя</label>
           <textarea x-model="aiConfig.communicator_prompt" rows="4" class="w-full bg-slate-800 border border-slate-700 rounded-xl p-3 text-xs text-slate-200 outline-none focus:border-indigo-500"></textarea>
@@ -640,7 +676,10 @@ ADMIN_HTML = """<!DOCTYPE html>
         selectedBotId: '',
         availableBots: [],
         pipelines: [],
+        showGeminiKey: false,
         aiConfig: {
+          gemini_api_key: '',
+          has_fallback_env_key: true,
           communicator_prompt: '',
           communicator_model: 'gemini-3.1-flash-lite',
           fallback_communicator_model: 'gemini-2.5-flash',
@@ -981,6 +1020,8 @@ ADMIN_HTML = """<!DOCTYPE html>
             if (!data.comment_prompt) data.comment_prompt = DEFAULT_COMMENT_PROMPT_TEXT;
             if (!data.direct_link) data.direct_link = '';
             if (!data.debounce_delay_seconds) data.debounce_delay_seconds = 2.5;
+            if (typeof data.gemini_api_key !== 'string') data.gemini_api_key = '';
+            this.showGeminiKey = false;
             this.aiConfig = data;
           } catch (e) {
             console.error('Ошибка загрузки настроек ИИ:', e);

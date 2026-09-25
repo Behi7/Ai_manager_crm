@@ -466,6 +466,7 @@ class DeliveryService:
             prompt = ai_config.comment_prompt
         direct_link = ai_config.direct_link if ai_config else None
 
+        account_gemini_key = (getattr(ai_config, "gemini_api_key", None) or "").strip() or None
         comm_model = ai_config.communicator_model if ai_config else "gemini-3.1-flash-lite"
         fallback_comm_model = ai_config.fallback_communicator_model if ai_config and ai_config.fallback_communicator_model else "gemini-2.5-flash"
         temperature = float(ai_config.temperature) if ai_config else 0.4
@@ -497,6 +498,7 @@ class DeliveryService:
                     system_instruction=prompt,
                     knowledge_content=knowledge_base,
                     ttl_seconds=3600,
+                    api_key=account_gemini_key,
                 )
                 if isinstance(created_cache, str) and created_cache:
                     gemini_cache_name = created_cache
@@ -525,7 +527,8 @@ class DeliveryService:
             knowledge_mode=knowledge_mode,
             gemini_cache_name=gemini_cache_name,
             is_comment=is_comment_lead,
-            direct_link=direct_link
+            direct_link=direct_link,
+            api_key=account_gemini_key
         )
 
         if comm_resp.media_summary:
@@ -731,6 +734,7 @@ class DeliveryService:
         disabled_field_keys: set = set()
         if enabled_mappings:
             full_dialog = history_payload + [{"role": "assistant", "content": reply_text}]
+            account_gemini_key = (getattr(ai_config, "gemini_api_key", None) or "").strip() or None
             ext_model = ai_config.extractor_model if ai_config else "gemini-3.1-flash-lite"
             fallback_ext_model = ai_config.fallback_extractor_model if ai_config and ai_config.fallback_extractor_model else "gemini-2.5-flash"
             ext_result = await extractor.extract_lead_fields(
@@ -739,7 +743,8 @@ class DeliveryService:
                 current_lead_values=amo_cf_values,
                 model_name=ext_model,
                 fallback_model=fallback_ext_model,
-                media_parts=media_parts
+                media_parts=media_parts,
+                api_key=account_gemini_key
             )
 
             if ext_result.fields_to_update:

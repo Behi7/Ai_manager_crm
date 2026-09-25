@@ -75,6 +75,7 @@ class UpdateAIConfigRequest(BaseModel):
     temperature: Optional[float] = None
     handover_after_stuck: Optional[int] = None
     debounce_delay_seconds: Optional[float] = Field(None, ge=0.5, le=60.0)
+    gemini_api_key: Optional[str] = None
     knowledge_base: Optional[str] = None
     knowledge_mode: Optional[str] = None
     comment_prompt: Optional[str] = None
@@ -923,6 +924,8 @@ async def get_ai_config(account_id: uuid.UUID):
             "temperature": float(cfg.temperature),
             "handover_after_stuck": cfg.handover_after_stuck,
             "debounce_delay_seconds": float(getattr(cfg, "debounce_delay_seconds", None) or 2.5),
+            "gemini_api_key": getattr(cfg, "gemini_api_key", None) or "",
+            "has_fallback_env_key": bool(settings.GEMINI_API_KEY),
             "knowledge_base": cfg.knowledge_base or "",
             "knowledge_mode": cfg.knowledge_mode or "plain_text",
             "gemini_cache_name": cfg.gemini_cache_name,
@@ -963,6 +966,12 @@ async def update_ai_config(account_id: uuid.UUID, payload: UpdateAIConfigRequest
             cfg.handover_after_stuck = payload.handover_after_stuck
         if payload.debounce_delay_seconds is not None:
             cfg.debounce_delay_seconds = float(payload.debounce_delay_seconds)
+        if payload.gemini_api_key is not None:
+            new_gemini_key = payload.gemini_api_key.strip() or None
+            if getattr(cfg, "gemini_api_key", None) != new_gemini_key:
+                cfg.gemini_cache_name = None
+                cfg.gemini_cache_expires_at = None
+            cfg.gemini_api_key = new_gemini_key
         if payload.knowledge_base is not None:
             if cfg.knowledge_base != payload.knowledge_base:
                 cfg.gemini_cache_name = None

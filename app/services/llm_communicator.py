@@ -64,6 +64,7 @@ class LLMCommunicator:
         gemini_cache_name: Optional[str] = None,
         is_comment: bool = False,
         direct_link: Optional[str] = None,
+        api_key: Optional[str] = None,
     ) -> CommunicatorResponse:
         """
         Генерация ответа клиенту на основе истории сообщений, мультимодальных вложений
@@ -73,7 +74,8 @@ class LLMCommunicator:
         target_fields: список полей, которые нужно выяснить [{"name": "...", "hint": "..."}]
         known_fields: словарь уже заполненных данных сделки {"Имя поля": "Значение"}
         """
-        if not self.api_key:
+        effective_api_key = (api_key or "").strip() or self.api_key
+        if not effective_api_key:
             return CommunicatorResponse(
                 text="Здравствуйте! Спасибо за обращение. Скоро мы свяжемся с вами.",
                 error="GEMINI_API_KEY is not set"
@@ -266,7 +268,7 @@ class LLMCommunicator:
                 }
 
             url = GEMINI_API_URL.format(model=cur_model)
-            params = {"key": self.api_key}
+            params = {"key": effective_api_key}
 
             # До 2 попыток на каждую модель (повтор при 503/429/5xx/сетевом сбое)
             for attempt in range(1, 3):
@@ -352,13 +354,15 @@ class LLMCommunicator:
         model_name: str,
         system_instruction: str,
         knowledge_content: str,
-        ttl_seconds: int = 3600
+        ttl_seconds: int = 3600,
+        api_key: Optional[str] = None,
     ) -> Optional[str]:
         """
         Создание или обновление кэша контекста (CachedContent) в Google Gemini API.
         Возвращает имя кэша (например, 'cachedContents/abc123xyz') или None при недостатке токенов (<32k) или ошибке.
         """
-        if not self.api_key or not knowledge_content:
+        effective_api_key = (api_key or "").strip() or self.api_key
+        if not effective_api_key or not knowledge_content:
             return None
 
         clean_model = model_name
@@ -366,7 +370,7 @@ class LLMCommunicator:
             clean_model = f"models/{clean_model}"
 
         url = "https://generativelanguage.googleapis.com/v1beta/cachedContents"
-        params = {"key": self.api_key}
+        params = {"key": effective_api_key}
         payload = {
             "model": clean_model,
             "contents": [

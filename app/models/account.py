@@ -158,6 +158,7 @@ class AIConfig(Base):
     temperature: Mapped[float] = mapped_column(Numeric(3, 2), default=0.4, nullable=False)
     handover_after_stuck: Mapped[int] = mapped_column(Integer, default=4, nullable=False)
     debounce_delay_seconds: Mapped[float] = mapped_column(Numeric(4, 1), default=2.5, server_default="2.5", nullable=False)
+    gemini_api_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     knowledge_base: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     knowledge_mode: Mapped[str] = mapped_column(String(50), default="plain_text", nullable=False)
     gemini_cache_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)

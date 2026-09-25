@@ -33,6 +33,7 @@ class LLMExtractor:
         model_name: str = "gemini-3.1-flash-lite",
         fallback_model: Optional[str] = None,
         media_parts: Optional[List[Dict[str, Any]]] = None,
+        api_key: Optional[str] = None,
     ) -> ExtractionResult:
         """
         Извлекает значения полей сделки из диалога с клиентом и медиавложений.
@@ -42,7 +43,8 @@ class LLMExtractor:
         if not enabled_fields:
             return ExtractionResult(raw_response={}, fields_to_update=[], field_name_values={})
 
-        if not self.api_key:
+        effective_api_key = (api_key or "").strip() or self.api_key
+        if not effective_api_key:
             return ExtractionResult(
                 raw_response={},
                 fields_to_update=[],
@@ -137,7 +139,7 @@ class LLMExtractor:
         for cur_model in models_to_try:
             is_fallback = (cur_model != model_name)
             url = GEMINI_API_URL.format(model=cur_model)
-            params = {"key": self.api_key}
+            params = {"key": effective_api_key}
 
             # До 2 попыток на каждую модель (повтор при 503/429/5xx/сетевом сбое)
             for attempt in range(1, 3):
