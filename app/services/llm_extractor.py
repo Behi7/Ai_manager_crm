@@ -159,7 +159,7 @@ class LLMExtractor:
             models_to_try.append(chosen_fallback)
 
         last_error: Optional[str] = None
-        parsed: Dict[str, Any] = {}
+        parsed: Optional[Dict[str, Any]] = None
 
         for cur_model in models_to_try:
             is_fallback = (cur_model != model_name)
@@ -217,7 +217,7 @@ class LLMExtractor:
                     logger.exception(f"Непредвиденное исключение экстрактора {cur_model}: {ex}")
                     break
 
-            if parsed:
+            if parsed is not None:
                 break
 
         if not parsed:
