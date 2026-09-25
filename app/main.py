@@ -25,9 +25,22 @@ async def lifespan(app: FastAPI):
     logger.info("Инициализация AI Manager Backend...")
     # Проверка подключения к БД (Fail-fast, IMPORTANT-07)
     try:
-        async with AsyncSessionLocal() as session:
-            await session.execute(text("SELECT 1"))
-        logger.info("Подключение к PostgreSQL успешно.")
+        async with engine.begin() as conn:
+            await conn.execute(text("ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS stages_json JSONB DEFAULT '[]'::jsonb;"))
+            await conn.execute(text("ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS enabled_stage_ids JSONB DEFAULT NULL;"))
+            await conn.execute(text("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'leads' AND column_name = 'is_busy'
+                    ) THEN
+                        ALTER TABLE leads ALTER COLUMN is_busy SET DEFAULT false;
+                        ALTER TABLE leads ALTER COLUMN is_busy DROP NOT NULL;
+                    END IF;
+                END $$;
+            """))
+        logger.info("Подключение к PostgreSQL и проверка схемы успешны.")
     except Exception as e:
         logger.critical(f"Критическая ошибка подключения к PostgreSQL при запуске: {e}")
         raise RuntimeError(f"Не удалось подключиться к PostgreSQL: {e}") from e
