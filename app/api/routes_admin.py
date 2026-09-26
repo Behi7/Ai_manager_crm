@@ -322,8 +322,7 @@ ADMIN_HTML = """<!DOCTYPE html>
          :class="{
            'max-w-3xl': activeTab === 'bot',
            'max-w-4xl': activeTab === 'pipelines' || activeTab === 'fields',
-           'max-w-5xl': activeTab === 'ai',
-           'max-w-6xl': activeTab === 'sys_prompts'
+           'max-w-6xl': activeTab === 'ai' || activeTab === 'sys_prompts'
          }"
          class="bg-slate-900 border border-slate-700 w-full rounded-2xl shadow-2xl p-6 space-y-5 max-h-[90vh] flex flex-col transition-all duration-300 ease-out">
       <div class="flex items-center justify-between border-b border-slate-800 pb-3">
@@ -505,162 +504,142 @@ ADMIN_HTML = """<!DOCTYPE html>
         </div>
       </div>
 
-      <!-- Tab 4: AI Config -->
+      <!-- Tab 4: AI Config (О компании и ИИ в 3 колонки) -->
       <div x-show="activeTab === 'ai'" x-transition:enter="transition-all ease-out duration-300" x-transition:enter-start="opacity-0 translate-y-2 scale-[0.98]" x-transition:enter-end="opacity-100 translate-y-0 scale-100" x-transition:leave="hidden" class="space-y-4 flex-1 overflow-y-auto pr-1">
-        <!-- Секция: Google AI Studio (Gemini API Key аккаунта) -->
-        <div class="p-3.5 bg-slate-800/90 border border-indigo-500/40 rounded-xl space-y-2">
-          <div class="flex items-center justify-between">
-            <label class="text-xs font-semibold text-indigo-300 flex items-center gap-1.5">
-              <i class="fa-solid fa-key text-indigo-400"></i> Google AI Studio (Gemini API Key аккаунта)
-            </label>
+        <!-- Верхняя компактная панель: Google AI Studio API Key + Модели и Тайминги -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <!-- Блок API-ключа -->
+          <div class="p-3 bg-slate-800/90 border border-indigo-500/40 rounded-xl flex flex-col justify-between space-y-2">
+            <div class="flex items-center justify-between gap-1">
+              <label class="text-xs font-semibold text-indigo-300 flex items-center gap-1.5">
+                <i class="fa-solid fa-key text-indigo-400"></i> Gemini API Key
+              </label>
+              <div>
+                <span x-show="aiConfig.gemini_api_key && aiConfig.gemini_api_key.trim().length > 0"
+                      class="px-2 py-0.5 bg-emerald-950/80 border border-emerald-700/60 text-emerald-300 rounded-md text-[10px] font-medium">
+                  <i class="fa-solid fa-check-circle mr-1"></i>Свой ключ
+                </span>
+                <span x-show="(!aiConfig.gemini_api_key || !aiConfig.gemini_api_key.trim()) && aiConfig.has_fallback_env_key"
+                      class="px-2 py-0.5 bg-amber-950/80 border border-amber-700/60 text-amber-300 rounded-md text-[10px] font-medium">
+                  <i class="fa-solid fa-triangle-exclamation mr-1"></i>Из .env
+                </span>
+                <span x-show="(!aiConfig.gemini_api_key || !aiConfig.gemini_api_key.trim()) && !aiConfig.has_fallback_env_key"
+                      class="px-2 py-0.5 bg-red-950/80 border border-red-700/60 text-red-300 rounded-md text-[10px] font-medium">
+                  <i class="fa-solid fa-circle-xmark mr-1"></i>Не задан
+                </span>
+              </div>
+            </div>
+            <div class="relative flex items-center">
+              <input :type="showGeminiKey ? 'text' : 'password'"
+                     x-model="aiConfig.gemini_api_key"
+                     placeholder="AIzaSy... (ключ Google AI Studio клиента)"
+                     class="w-full bg-slate-900 border border-slate-700 rounded-xl pl-3 pr-9 py-1.5 text-xs font-mono text-white outline-none focus:border-indigo-500">
+              <button type="button" @click="showGeminiKey = !showGeminiKey"
+                      class="absolute right-2.5 text-slate-400 hover:text-slate-200 text-xs">
+                <i class="fa-solid" :class="showGeminiKey ? 'fa-eye-slash' : 'fa-eye'"></i>
+              </button>
+            </div>
+            <div class="text-[10px] text-slate-400">Индивидуальный проект Google AI Studio для раздельного учёта квот.</div>
+          </div>
+
+          <!-- Блок Моделей (Общитель и Экстрактор) -->
+          <div class="p-3 bg-slate-800/80 border border-slate-700 rounded-xl grid grid-cols-2 gap-2.5">
             <div>
-              <span x-show="aiConfig.gemini_api_key && aiConfig.gemini_api_key.trim().length > 0"
-                    class="px-2 py-0.5 bg-emerald-950/80 border border-emerald-700/60 text-emerald-300 rounded-md text-[10px] font-medium">
-                <i class="fa-solid fa-check-circle mr-1"></i>Индивидуальный ключ задан
-              </span>
-              <span x-show="(!aiConfig.gemini_api_key || !aiConfig.gemini_api_key.trim()) && aiConfig.has_fallback_env_key"
-                    class="px-2 py-0.5 bg-amber-950/80 border border-amber-700/60 text-amber-300 rounded-md text-[10px] font-medium">
-                <i class="fa-solid fa-triangle-exclamation mr-1"></i>Используется общий ключ из .env
-              </span>
-              <span x-show="(!aiConfig.gemini_api_key || !aiConfig.gemini_api_key.trim()) && !aiConfig.has_fallback_env_key"
-                    class="px-2 py-0.5 bg-red-950/80 border border-red-700/60 text-red-300 rounded-md text-[10px] font-medium">
-                <i class="fa-solid fa-circle-xmark mr-1"></i>Ключ не задан
-              </span>
+              <label class="block text-[10px] font-medium text-slate-400 mb-1">Модель Общителя</label>
+              <input type="text" x-model="aiConfig.communicator_model" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white font-mono">
+            </div>
+            <div>
+              <label class="block text-[10px] font-medium text-slate-400 mb-1">Модель Экстрактора</label>
+              <input type="text" x-model="aiConfig.extractor_model" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white font-mono">
+            </div>
+            <div>
+              <label class="block text-[10px] font-medium text-emerald-400/90 mb-1"><i class="fa-solid fa-shield-halved mr-1"></i>Резерв Общителя</label>
+              <input type="text" x-model="aiConfig.fallback_communicator_model" placeholder="gemini-2.5-flash" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white font-mono">
+            </div>
+            <div>
+              <label class="block text-[10px] font-medium text-emerald-400/90 mb-1"><i class="fa-solid fa-shield-halved mr-1"></i>Резерв Экстрактора</label>
+              <input type="text" x-model="aiConfig.fallback_extractor_model" placeholder="gemini-2.5-flash" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white font-mono">
             </div>
           </div>
-          <div class="relative flex items-center">
-            <input :type="showGeminiKey ? 'text' : 'password'"
-                   x-model="aiConfig.gemini_api_key"
-                   placeholder="AIzaSy... (вставьте API-ключ из проекта Google AI Studio для этого клиента)"
-                   class="w-full bg-slate-900 border border-slate-700 rounded-xl pl-3 pr-10 py-2 text-xs font-mono text-white outline-none focus:border-indigo-500">
-            <button type="button" @click="showGeminiKey = !showGeminiKey"
-                    class="absolute right-2.5 text-slate-400 hover:text-slate-200 text-xs">
-              <i class="fa-solid" :class="showGeminiKey ? 'fa-eye-slash' : 'fa-eye'"></i>
-            </button>
-          </div>
-          <div class="text-[10px] text-slate-400">
-            У каждого клиента может быть свой проект в Google AI Studio для раздельного учёта квот и расходов.
-          </div>
-        </div>
 
-        <div class="p-3.5 bg-slate-800/80 border border-slate-700 rounded-xl space-y-2">
-          <div class="flex items-center justify-between">
-            <label class="text-xs font-semibold text-emerald-300 flex items-center gap-1.5">
-              <i class="fa-solid fa-building text-emerald-400"></i> О компании (Профиль бизнеса и роль менеджера)
-            </label>
-            <span class="text-[10px] px-2 py-0.5 rounded bg-slate-700/80 text-slate-300">Индивидуально для бизнеса</span>
-          </div>
-          <textarea x-model="aiConfig.communicator_prompt" rows="4"
-                    placeholder="Например: Мы компания Marketing Markazi в Ташкенте. Занимаемся разработкой сайтов, внедрением amoCRM и ИИ-менеджеров. Наши преимущества: запуск за 3 дня, официальная гарантия по договору. График работы: Пн-Сб 9:00–19:00. Ты — активный менеджер отдела продаж нашей компании."
-                    class="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs text-slate-200 outline-none focus:border-indigo-500 leading-relaxed"></textarea>
-          <div class="text-[10px] text-slate-400">
-            Опишите здесь суть бизнеса, нишу, преимущества, график работы и кем представляется менеджер. Технические правила диалога и квалификации уже настроены во вкладке <strong>«5. Системные промпты»</strong>.
-          </div>
-        </div>
-
-        <!-- Секция: База знаний и каталог продуктов -->
-        <div class="p-3.5 bg-slate-800/80 border border-slate-700 rounded-xl space-y-3">
-          <div class="flex items-center justify-between">
-            <label class="text-xs font-semibold text-indigo-300 flex items-center gap-1.5">
-              <i class="fa-solid fa-book-bookmark text-indigo-400"></i> Каталог продуктов и База знаний
-            </label>
-            <span class="text-[11px] text-slate-400" x-show="aiConfig && aiConfig.knowledge_base">
-              Символов: <span class="font-mono text-indigo-300" x-text="(aiConfig && aiConfig.knowledge_base) ? aiConfig.knowledge_base.length : 0"></span>
-            </span>
-          </div>
-
-          <div class="space-y-1">
-            <label class="block text-[11px] font-medium text-slate-300">Режим работы с каталогом продуктов:</label>
-            <select x-model="aiConfig.knowledge_mode" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white outline-none focus:border-indigo-500">
-              <option value="plain_text">Простой текст в промпте (In-Context) — до 50 товаров/услуг</option>
-              <option value="gemini_cache">Google Gemini Context Caching (Большой каталог >32k токенов)</option>
-              <option value="disabled">Отключено (без каталога)</option>
-            </select>
-          </div>
-
-          <div x-show="aiConfig.knowledge_mode !== 'disabled'" class="space-y-2">
-            <label class="block text-[11px] font-medium text-slate-300">Описание товаров, услуг, цен и условий:</label>
-            <textarea x-model="aiConfig.knowledge_base" rows="5"
-                      placeholder="### Товар 1: Название&#10;- Цена: 25 000 руб.&#10;- Для кого: Малый бизнес&#10;- Что входит: Описание продукта...&#10;- Триггер для рекомендации: Если клиент спрашивает про автоматизацию...&#10;&#10;### Товар 2: Название...&#10;- Цена: 50 000 руб."
-                      class="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs font-mono text-slate-200 outline-none focus:border-indigo-500"></textarea>
-
-            <div class="p-2.5 bg-indigo-950/40 border border-indigo-800/40 rounded-lg text-[11px] text-indigo-200 space-y-1">
-              <div class="font-medium text-indigo-300 flex items-center gap-1">
-                <i class="fa-solid fa-circle-info"></i> Как ИИ использует эту базу:
-              </div>
-              <div>• На обычные приветствия («Привет», «Здравствуйте») каталог <strong>НЕ вываливается</strong>.</div>
-              <div>• ИИ рекомендует конкретный продукт только тогда, когда клиент сам спросил о ценах/товарах или когда в ходе диалога стали понятны его потребности.</div>
-              <div x-show="aiConfig.knowledge_mode === 'gemini_cache'" class="text-amber-300 pt-1">
-                <i class="fa-solid fa-bolt text-amber-400"></i> Режим Gemini Cache: для кэширования в Google TPU требуется от ~32k токенов. При меньшем объёме система автоматически передаст текст напрямую в промпт без ошибок.
-              </div>
+          <!-- Блок Таймингов и Параметров -->
+          <div class="p-3 bg-slate-800/80 border border-slate-700 rounded-xl grid grid-cols-3 gap-2.5 items-center">
+            <div>
+              <label class="block text-[10px] font-medium text-slate-300 mb-1">Пауза ответа (с)</label>
+              <input type="number" step="0.5" min="0.5" max="60" x-model="aiConfig.debounce_delay_seconds" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
+              <div class="text-[9px] text-slate-500 mt-0.5">Склейка серии сообщ.</div>
+            </div>
+            <div>
+              <label class="block text-[10px] font-medium text-slate-300 mb-1">Температура</label>
+              <input type="number" step="0.1" min="0" max="1" x-model="aiConfig.temperature" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
+              <div class="text-[9px] text-slate-500 mt-0.5">Креативность (0.4)</div>
+            </div>
+            <div>
+              <label class="block text-[10px] font-medium text-slate-300 mb-1">Лимит Handover</label>
+              <input type="number" min="1" max="10" x-model="aiConfig.handover_after_stuck" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
+              <div class="text-[9px] text-slate-500 mt-0.5">Перевод на оператора</div>
             </div>
           </div>
         </div>
 
-        <!-- Секция: Публичные комментарии в соцсетях и Direct -->
-        <div class="p-3.5 bg-slate-800/80 border border-slate-700 rounded-xl space-y-3">
-          <div class="flex items-center justify-between">
-            <label class="text-xs font-semibold text-sky-300 flex items-center gap-1.5">
-              <i class="fa-solid fa-comments text-sky-400"></i> Автоответы на комментарии и перевод в Direct
-            </label>
+        <!-- 3 основные колонки бизнеса: 1. О компании | 2. Каталог продуктов | 3. Комментарии и Direct -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <!-- Колонка 1: О компании -->
+          <div class="p-3.5 bg-slate-800/60 border border-slate-700 rounded-xl flex flex-col space-y-2">
+            <div class="flex items-center justify-between">
+              <label class="text-xs font-semibold text-emerald-300 flex items-center gap-1.5">
+                <i class="fa-solid fa-building text-emerald-400"></i>
+                <span>1. О компании и Роль менеджера</span>
+              </label>
+              <span class="text-[10px] px-2 py-0.5 rounded bg-emerald-950/70 text-emerald-300 border border-emerald-800/50">Бизнес</span>
+            </div>
+            <div class="text-[11px] text-slate-400 leading-relaxed">
+              Опишите суть бизнеса, нишу, преимущества, график работы и кем представляется менеджер. Технические правила находятся во вкладке «5. Системные промпты».
+            </div>
+            <textarea x-model="aiConfig.communicator_prompt" rows="15"
+                      placeholder="Например: Мы компания Marketing Markazi в Ташкенте. Занимаемся разработкой сайтов, внедрением amoCRM и ИИ-менеджеров. Наши преимущества: запуск за 3 дня, официальная гарантия по договору. График работы: Пн-Сб 9:00–19:00. Ты — активный менеджер отдела продаж нашей компании."
+                      class="w-full flex-1 bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs text-slate-200 outline-none focus:border-emerald-500 leading-relaxed"></textarea>
           </div>
 
-          <div>
-            <label class="block text-[11px] font-medium text-slate-300 mb-1">Ссылка на Direct компании (Instagram / Telegram / др.):</label>
-            <input type="text" x-model="aiConfig.direct_link" placeholder="https://ig.me/m/marketingmarkaziuz"
-                   class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white outline-none focus:border-indigo-500 font-mono">
-            <div class="text-[10px] text-slate-400 mt-0.5">ИИ будет прикреплять эту ссылку в ответ на комментарии, чтобы клиент в 1 клик переходил в личные сообщения.</div>
+          <!-- Колонка 2: Каталог продуктов и База знаний -->
+          <div class="p-3.5 bg-slate-800/60 border border-slate-700 rounded-xl flex flex-col space-y-2">
+            <div class="flex items-center justify-between">
+              <label class="text-xs font-semibold text-indigo-300 flex items-center gap-1.5">
+                <i class="fa-solid fa-book-bookmark text-indigo-400"></i>
+                <span>2. Каталог продуктов и База знаний</span>
+              </label>
+              <span class="text-[10px] px-2 py-0.5 rounded bg-indigo-950/70 text-indigo-300 border border-indigo-800/50" x-text="(aiConfig && aiConfig.knowledge_base) ? (aiConfig.knowledge_base.length + ' симв.') : 'Прайс / Услуги'"></span>
+            </div>
+            <div class="space-y-1">
+              <select x-model="aiConfig.knowledge_mode" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500">
+                <option value="plain_text">In-Context (в промпте — до 50 товаров/услуг)</option>
+                <option value="gemini_cache">Gemini Context Cache (большой каталог >32k токенов)</option>
+                <option value="disabled">Отключено (без каталога)</option>
+              </select>
+            </div>
+            <textarea x-show="aiConfig.knowledge_mode !== 'disabled'" x-model="aiConfig.knowledge_base" rows="13"
+                      placeholder="### Услуга 1: Внедрение amoCRM&#10;- Цена: от 3 000 000 сум&#10;- Срок: 3-5 дней&#10;- Что входит: Настройка воронок, интеграция Telegram/Instagram, обучение отдела продаж..."
+                      class="w-full flex-1 bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs font-mono text-slate-200 outline-none focus:border-indigo-500 leading-relaxed"></textarea>
+            <div x-show="aiConfig.knowledge_mode === 'disabled'" class="flex-1 flex items-center justify-center text-xs text-slate-500 border border-dashed border-slate-700 rounded-xl p-4 text-center">
+              Каталог отключен. Выберите режим выше, чтобы добавить товары или услуги.
+            </div>
           </div>
 
-          <div class="space-y-1">
-            <label class="block text-[11px] font-medium text-slate-300">Промпт для комментариев под постами (на узбекском / русском):</label>
-            <textarea x-model="aiConfig.comment_prompt" rows="7"
-                      class="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs text-slate-200 outline-none focus:border-indigo-500 font-mono"></textarea>
-            <div class="text-[10px] text-slate-400">Когда сообщение приходит из комментария под постом, ИИ использует эту готовую инструкцию. Вы можете свободно редактировать правила и фразы под себя.</div>
-          </div>
-        </div>
-
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <label class="block text-xs font-medium text-slate-300 mb-1">Модель Общителя (Основная)</label>
-            <input type="text" x-model="aiConfig.communicator_model" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
-          </div>
-          <div>
-            <label class="block text-xs font-medium text-slate-300 mb-1">Модель Экстрактора (Основная)</label>
-            <input type="text" x-model="aiConfig.extractor_model" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
-          </div>
-        </div>
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <label class="block text-xs font-medium text-slate-300 mb-1 flex items-center gap-1">
-              <i class="fa-solid fa-shield-halved text-emerald-400 text-[11px]"></i>
-              <span>Запасная модель Общителя</span>
-            </label>
-            <input type="text" x-model="aiConfig.fallback_communicator_model" placeholder="gemini-2.5-flash" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
-            <div class="text-[10px] text-slate-400 mt-0.5">Включается при сбое/перегрузке (503, 429, таймаут)</div>
-          </div>
-          <div>
-            <label class="block text-xs font-medium text-slate-300 mb-1 flex items-center gap-1">
-              <i class="fa-solid fa-shield-halved text-emerald-400 text-[11px]"></i>
-              <span>Запасная модель Экстрактора</span>
-            </label>
-            <input type="text" x-model="aiConfig.fallback_extractor_model" placeholder="gemini-2.5-flash" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
-            <div class="text-[10px] text-slate-400 mt-0.5">Включается при сбое/перегрузке для извлечения полей</div>
-          </div>
-        </div>
-        <div class="grid grid-cols-3 gap-3">
-          <div>
-            <label class="block text-xs font-medium text-slate-300 mb-1">Пауза перед ответом (сек)</label>
-            <input type="number" step="0.5" min="0.5" max="60" x-model="aiConfig.debounce_delay_seconds" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
-            <div class="text-[10px] text-slate-400 mt-0.5">Ожидание серии сообщений клиента (по умолч. 2.5с)</div>
-          </div>
-          <div>
-            <label class="block text-xs font-medium text-slate-300 mb-1">Температура генерации (0.0 - 1.0)</label>
-            <input type="number" step="0.1" min="0" max="1" x-model="aiConfig.temperature" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
-          </div>
-          <div>
-            <label class="block text-xs font-medium text-slate-300 mb-1">Лимит застревания (Handover)</label>
-            <input type="number" min="1" max="10" x-model="aiConfig.handover_after_stuck" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
+          <!-- Колонка 3: Автоответы на комментарии и Direct -->
+          <div class="p-3.5 bg-slate-800/60 border border-slate-700 rounded-xl flex flex-col space-y-2">
+            <div class="flex items-center justify-between">
+              <label class="text-xs font-semibold text-sky-300 flex items-center gap-1.5">
+                <i class="fa-solid fa-comments text-sky-400"></i>
+                <span>3. Комментарии и Перевод в Direct</span>
+              </label>
+              <span class="text-[10px] px-2 py-0.5 rounded bg-sky-950/70 text-sky-300 border border-sky-800/50">Instagram / Reels</span>
+            </div>
+            <div>
+              <input type="text" x-model="aiConfig.direct_link" placeholder="Ссылка на Direct: https://ig.me/m/..."
+                     class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-sky-500 font-mono">
+            </div>
+            <textarea x-model="aiConfig.comment_prompt" rows="13"
+                      class="w-full flex-1 bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs font-mono text-slate-200 outline-none focus:border-sky-500 leading-relaxed"></textarea>
           </div>
         </div>
       </div>
