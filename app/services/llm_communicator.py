@@ -176,7 +176,7 @@ class LLMCommunicator:
 
         base_rules_prompt = (rules_prompt or "").strip() or DEFAULT_COMMUNICATOR_RULES_PROMPT
         full_system_instruction = (
-            f"{formatted_system_prompt}\n"
+            f"О КОМПАНИИ И РОЛИ МЕНЕДЖЕРА:\n{formatted_system_prompt}\n"
             f"{knowledge_instruction}"
             f"{known_info}"
             f"{qualification_instruction}"

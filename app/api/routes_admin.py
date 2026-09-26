@@ -386,7 +386,7 @@ ADMIN_HTML = """<!DOCTYPE html>
           <i class="fa-solid fa-table-columns mr-1"></i> 3. Экстрактор полей
         </button>
         <button @click="activeTab = 'ai'" :class="activeTab === 'ai' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white bg-slate-800'" class="px-3.5 py-1.5 rounded-lg transition-all duration-200 ease-out transform active:scale-95">
-          <i class="fa-solid fa-brain mr-1"></i> 4. Промпт и ИИ
+          <i class="fa-solid fa-building mr-1"></i> 4. О компании и ИИ
         </button>
         <button @click="activeTab = 'sys_prompts'" :class="activeTab === 'sys_prompts' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white bg-slate-800'" class="px-3.5 py-1.5 rounded-lg transition-all duration-200 ease-out transform active:scale-95">
           <i class="fa-solid fa-gears mr-1"></i> 5. Системные промпты
@@ -543,9 +543,19 @@ ADMIN_HTML = """<!DOCTYPE html>
           </div>
         </div>
 
-        <div>
-          <label class="block text-xs font-medium text-slate-300 mb-1">Системный промпт Общителя</label>
-          <textarea x-model="aiConfig.communicator_prompt" rows="4" class="w-full bg-slate-800 border border-slate-700 rounded-xl p-3 text-xs text-slate-200 outline-none focus:border-indigo-500"></textarea>
+        <div class="p-3.5 bg-slate-800/80 border border-slate-700 rounded-xl space-y-2">
+          <div class="flex items-center justify-between">
+            <label class="text-xs font-semibold text-emerald-300 flex items-center gap-1.5">
+              <i class="fa-solid fa-building text-emerald-400"></i> О компании (Профиль бизнеса и роль менеджера)
+            </label>
+            <span class="text-[10px] px-2 py-0.5 rounded bg-slate-700/80 text-slate-300">Индивидуально для бизнеса</span>
+          </div>
+          <textarea x-model="aiConfig.communicator_prompt" rows="4"
+                    placeholder="Например: Мы компания Marketing Markazi в Ташкенте. Занимаемся разработкой сайтов, внедрением amoCRM и ИИ-менеджеров. Наши преимущества: запуск за 3 дня, официальная гарантия по договору. График работы: Пн-Сб 9:00–19:00. Ты — активный менеджер отдела продаж нашей компании."
+                    class="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs text-slate-200 outline-none focus:border-indigo-500 leading-relaxed"></textarea>
+          <div class="text-[10px] text-slate-400">
+            Опишите здесь суть бизнеса, нишу, преимущества, график работы и кем представляется менеджер. Технические правила диалога и квалификации уже настроены во вкладке <strong>«5. Системные промпты»</strong>.
+          </div>
         </div>
 
         <!-- Секция: База знаний и каталог продуктов -->
