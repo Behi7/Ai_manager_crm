@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import ipaddress
 import socket
 import logging
@@ -8,6 +9,9 @@ from urllib.parse import urlparse, urljoin
 import httpx
 
 logger = logging.getLogger("AmoCRMClient")
+
+_last_status_var: contextvars.ContextVar[int] = contextvars.ContextVar("last_status_code", default=400)
+_last_error_transient_var: contextvars.ContextVar[bool] = contextvars.ContextVar("last_error_transient", default=False)
 
 
 class AmoCRMAuthOrBillingError(Exception):
@@ -41,8 +45,22 @@ class AmoCRMClient:
         self.rate_limiter = AmoCRMRateLimiter(min_interval=0.15)
         self._client: Optional[httpx.AsyncClient] = None
         self._client_lock = asyncio.Lock()
-        self.last_status_code: int = 400
-        self.last_error_transient: bool = False
+
+    @property
+    def last_status_code(self) -> int:
+        return _last_status_var.get()
+
+    @last_status_code.setter
+    def last_status_code(self, val: int) -> None:
+        _last_status_var.set(int(val))
+
+    @property
+    def last_error_transient(self) -> bool:
+        return _last_error_transient_var.get()
+
+    @last_error_transient.setter
+    def last_error_transient(self, val: bool) -> None:
+        _last_error_transient_var.set(bool(val))
 
     ALLOWED_DOMAINS = (".amocrm.ru", ".amocrm.com", ".kommo.com")
 
@@ -894,7 +912,8 @@ class AmoCRMClient:
                     logger.warning(f"Не удалось скачать вложение {target_url}: HTTP {status_code}")
                 return None
 
-            file_name = hint_filename or parsed.path.split("/")[-1] or "attachment"
+            parsed_target = urlparse(target_url)
+            file_name = hint_filename or parsed_target.path.split("/")[-1] or "attachment"
             mime_type = self.detect_media_mime_type(
                 content=content,
                 content_type_header=content_type or "",

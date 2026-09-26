@@ -190,6 +190,13 @@ async def _verify_account_if_needed(account_uuid: uuid.UUID):
             acc_stmt = select(Account).where(Account.id == account_uuid)
             acc = (await session.execute(acc_stmt)).scalar_one_or_none()
             if acc:
+                if not acc.is_active or acc.status == AccountStatus.ERROR:
+                    try:
+                        r = await debounce_service.get_redis()
+                        await r.set(f"acc_disabled:{account_uuid}", "1")
+                    except Exception:
+                        pass
+                    return
                 if acc.ai_config and getattr(acc.ai_config, "debounce_delay_seconds", None) is not None:
                     try:
                         r = await debounce_service.get_redis()

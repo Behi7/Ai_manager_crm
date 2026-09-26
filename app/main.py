@@ -65,6 +65,16 @@ async def lifespan(app: FastAPI):
         # Гарантированное освобождение ресурсов при любом исходе (IMPORTANT-06)
         logger.info("Завершение работы AI Manager Backend...")
         try:
+            for timer in list(debounce_service._timers.values()):
+                timer.cancel()
+            debounce_service._timers.clear()
+            if debounce_service._background_tasks:
+                logger.info(f"Ожидание завершения {len(debounce_service._background_tasks)} фоновых задач дебаунса...")
+                await asyncio.gather(*debounce_service._background_tasks, return_exceptions=True)
+        except Exception as e:
+            logger.error(f"Ошибка ожидания фоновых задач при остановке: {e}")
+
+        try:
             await amocrm_client.close()
         except Exception as e:
             logger.error(f"Ошибка закрытия AmoCRM HTTP client: {e}")

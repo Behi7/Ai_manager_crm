@@ -239,3 +239,61 @@ class TestAuditCritical5(unittest.IsolatedAsyncioTestCase):
             self.assertIn("fargonada", comm_kwargs["messages"][-1]["content"])
             # И Salesbot запустился ровно 1 раз
             self.assertEqual(mock_bot.await_count, 1)
+
+    async def test_download_attachment_without_hint_filename_does_not_crash(self):
+        """Проверка: download_attachment без hint_filename корректно берет имя файла из URL без NameError"""
+        client = AmoCRMClient()
+        mock_stream_resp = MagicMock()
+        mock_stream_resp.status_code = 200
+        mock_stream_resp.headers = {"content-type": "audio/ogg"}
+        mock_stream_resp.__aenter__ = AsyncMock(return_value=mock_stream_resp)
+        mock_stream_resp.__aexit__ = AsyncMock(return_value=None)
+
+        async def _fake_bytes(chunk_size=65536):
+            yield b"OggS\x00\x02\x00\x00\x00\x00\x00\x00"
+
+        mock_stream_resp.aiter_bytes = _fake_bytes
+        mock_http = MagicMock()
+        mock_http.stream = MagicMock(return_value=mock_stream_resp)
+
+        with patch.object(client, "get_client", new=AsyncMock(return_value=mock_http)), \
+             patch("app.services.amocrm_client.socket.getaddrinfo", return_value=[(None, None, None, None, ("93.184.216.34", 443))]):
+            res = await client.download_attachment(
+                url="https://cdn.amocrm.ru/attachments/voice_note_123.ogg",
+                hint_filename="",
+                hint_type="voice",
+            )
+            self.assertIsNotNone(res)
+            self.assertEqual(res["file_name"], "voice_note_123.ogg")
+            self.assertEqual(res["mime_type"], "audio/ogg")
+
+    async def test_secret_encryption_and_contextvar_isolation(self):
+        """Проверка шифрования/маскирования gemini_api_key и изоляции last_status_code между корутинами"""
+        import asyncio
+        from app.core.security import encrypt_secret_str, decrypt_secret_str, mask_secret_str
+
+        raw_key = "AIzaSyTestKey1234567890"
+        enc = encrypt_secret_str(raw_key)
+        self.assertTrue(enc.startswith("enc:v1:"))
+        self.assertEqual(decrypt_secret_str(enc), raw_key)
+        self.assertEqual(mask_secret_str(enc), "***7890")
+        # Обратная совместимость с открытой строкой
+        self.assertEqual(decrypt_secret_str(raw_key), raw_key)
+
+        client = AmoCRMClient()
+        results = {}
+
+        async def worker_a():
+            client.last_status_code = 503
+            await asyncio.sleep(0.02)
+            results["a"] = client.last_status_code
+
+        async def worker_b():
+            await asyncio.sleep(0.01)
+            client.last_status_code = 400
+            results["b"] = client.last_status_code
+
+        await asyncio.gather(worker_a(), worker_b())
+        self.assertEqual(results["a"], 503)
+        self.assertEqual(results["b"], 400)
+

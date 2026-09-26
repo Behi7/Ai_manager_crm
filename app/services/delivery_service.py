@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from app.core.database import AsyncSessionLocal
-from app.core.security import decrypt_token
+from app.core.security import decrypt_token, decrypt_secret_str
 from app.models.account import Account, AccountStatus, FieldMapping
 from app.models.lead import Lead, ConversationMessage
 from app.models.extraction import ExtractionLog
@@ -604,7 +604,7 @@ class DeliveryService:
             prompt = ai_config.comment_prompt
         direct_link = ai_config.direct_link if ai_config else None
 
-        account_gemini_key = (getattr(ai_config, "gemini_api_key", None) or "").strip() or None
+        account_gemini_key = decrypt_secret_str(getattr(ai_config, "gemini_api_key", None))
         comm_model = ai_config.communicator_model if ai_config else "gemini-3.1-flash-lite"
         fallback_comm_model = ai_config.fallback_communicator_model if ai_config and ai_config.fallback_communicator_model else "gemini-2.5-flash"
         temperature = float(ai_config.temperature) if ai_config else 0.4
@@ -838,7 +838,7 @@ class DeliveryService:
         disabled_field_keys: set = set()
         if enabled_mappings:
             full_dialog = (history_payload + [{"role": "assistant", "content": reply_text}]) if reply_text else list(history_payload)
-            account_gemini_key = (getattr(ai_config, "gemini_api_key", None) or "").strip() or None
+            account_gemini_key = decrypt_secret_str(getattr(ai_config, "gemini_api_key", None))
             ext_model = ai_config.extractor_model if ai_config else "gemini-3.1-flash-lite"
             fallback_ext_model = ai_config.fallback_extractor_model if ai_config and ai_config.fallback_extractor_model else "gemini-2.5-flash"
             ext_sys_prompt = getattr(ai_config, "extractor_system_prompt", None) if ai_config else None
@@ -992,7 +992,10 @@ class DeliveryService:
                     ent = item.get("entity_type") or fm_id_to_ent_mem.get(fid, "lead")
                     if (ent, int(fid)) not in disabled_field_keys:
                         amo_cf_values[(ent, int(fid))] = val_str
-                        amo_cf_values[int(fid)] = val_str
+                        if ent == "lead":
+                            amo_cf_values[int(fid)] = val_str
+                        else:
+                            amo_cf_values.setdefault(int(fid), val_str)
 
         if not skip_stage_advance:
             await self._advance_pipeline_stage(

@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     @classmethod
     def validate_secret_key(cls, v: str) -> str:
         if v == DEFAULT_INSECURE_SECRET:
+            logger.critical("КРИТИЧЕСКАЯ ОШИБКА: Используется дефолтный SECRET_KEY!")
             logger.warning(
                 "ВНИМАНИЕ: Используется небезопасный дефолтный SECRET_KEY. "
                 "Обязательно задайте уникальный SECRET_KEY в файле .env!"

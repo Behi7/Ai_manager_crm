@@ -38,3 +38,42 @@ def decrypt_token(encrypted_token: bytes) -> str:
             401,
             "Не удалось расшифровать токен amoCRM (ключ шифрования изменен или токен поврежден). Переподключите аккаунт."
         ) from exc
+
+
+def encrypt_secret_str(raw: str | None) -> str | None:
+    """Шифрует строковый секрет (например, gemini_api_key) в строку с префиксом enc:v1:"""
+    if not raw or not isinstance(raw, str):
+        return None
+    val = raw.strip()
+    if not val:
+        return None
+    if val.startswith("enc:v1:"):
+        return val
+    token = _cipher_suite.encrypt(val.encode("utf-8")).decode("ascii")
+    return f"enc:v1:{token}"
+
+
+def decrypt_secret_str(stored: str | None) -> str | None:
+    """Расшифровывает строковый секрет (с обратной совместимостью для открытых строк)"""
+    if not stored or not isinstance(stored, str):
+        return None
+    val = stored.strip()
+    if not val:
+        return None
+    if val.startswith("enc:v1:"):
+        try:
+            return _cipher_suite.decrypt(val[7:].encode("ascii")).decode("utf-8")
+        except Exception:
+            return None
+    return val
+
+
+def mask_secret_str(stored: str | None) -> str:
+    """Возвращает маскированное представление ключа ('***abcd') для безопасного отображения в API"""
+    plain = decrypt_secret_str(stored)
+    if not plain:
+        return ""
+    if len(plain) > 4:
+        return f"***{plain[-4:]}"
+    return "***"
+

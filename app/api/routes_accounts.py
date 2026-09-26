@@ -11,7 +11,7 @@ from sqlalchemy.orm import selectinload
 from app.core.config import settings
 from app.core.auth import verify_admin_key
 from app.core.database import AsyncSessionLocal
-from app.core.security import encrypt_token, decrypt_token
+from app.core.security import encrypt_token, decrypt_token, encrypt_secret_str, decrypt_secret_str, mask_secret_str
 from app.models.account import (
     Account, AccountStatus, Pipeline, FieldMapping, AIConfig,
     DEFAULT_COMMENT_PROMPT, DEFAULT_EXTRACTOR_SYSTEM_PROMPT,
@@ -887,13 +887,16 @@ async def get_account_fields(account_id: uuid.UUID):
 
 
 @router.delete("/{account_id}/fields/{amo_field_id}")
-async def delete_account_field_mapping(account_id: uuid.UUID, amo_field_id: int):
+async def delete_account_field_mapping(account_id: uuid.UUID, amo_field_id: int, entity_type: Optional[str] = None):
     """Удаление маппинга поля из базы данных (для удаленных полей amoCRM)"""
     async with AsyncSessionLocal() as session:
-        stmt = select(FieldMapping).where(
+        conds = [
             FieldMapping.account_id == account_id,
-            FieldMapping.amo_field_id == amo_field_id
-        )
+            FieldMapping.amo_field_id == amo_field_id,
+        ]
+        if entity_type in ("lead", "contact"):
+            conds.append(FieldMapping.entity_type == entity_type)
+        stmt = select(FieldMapping).where(*conds).limit(1)
         fm = (await session.execute(stmt)).scalar_one_or_none()
         if not fm:
             raise HTTPException(status_code=404, detail="Маппинг поля не найден")
@@ -947,7 +950,7 @@ async def get_ai_config(account_id: uuid.UUID):
             "temperature": float(cfg.temperature),
             "handover_after_stuck": cfg.handover_after_stuck,
             "debounce_delay_seconds": float(getattr(cfg, "debounce_delay_seconds", None) or 2.5),
-            "gemini_api_key": getattr(cfg, "gemini_api_key", None) or "",
+            "gemini_api_key": mask_secret_str(getattr(cfg, "gemini_api_key", None)),
             "has_fallback_env_key": bool(settings.GEMINI_API_KEY),
             "knowledge_base": cfg.knowledge_base or "",
             "knowledge_mode": cfg.knowledge_mode or "plain_text",
@@ -993,11 +996,13 @@ async def update_ai_config(account_id: uuid.UUID, payload: UpdateAIConfigRequest
         if payload.debounce_delay_seconds is not None:
             cfg.debounce_delay_seconds = float(payload.debounce_delay_seconds)
         if payload.gemini_api_key is not None:
-            new_gemini_key = payload.gemini_api_key.strip() or None
-            if getattr(cfg, "gemini_api_key", None) != new_gemini_key:
-                cfg.gemini_cache_name = None
-                cfg.gemini_cache_expires_at = None
-            cfg.gemini_api_key = new_gemini_key
+            raw_input_key = payload.gemini_api_key.strip()
+            if not raw_input_key.startswith("***"):
+                new_encrypted_key = encrypt_secret_str(raw_input_key) if raw_input_key else None
+                if decrypt_secret_str(getattr(cfg, "gemini_api_key", None)) != (raw_input_key or None):
+                    cfg.gemini_cache_name = None
+                    cfg.gemini_cache_expires_at = None
+                cfg.gemini_api_key = new_encrypted_key
         if payload.knowledge_base is not None:
             if cfg.knowledge_base != payload.knowledge_base:
                 cfg.gemini_cache_name = None
