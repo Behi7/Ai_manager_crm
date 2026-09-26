@@ -318,7 +318,14 @@ ADMIN_HTML = """<!DOCTYPE html>
 
   <!-- MODAL: Детальная настройка аккаунта (Боты, Воронки, Поля Экстрактора, Промпт ИИ) -->
   <div x-show="openSettingsModal" x-cloak class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" x-transition>
-    <div @click.outside="openSettingsModal = false" :class="activeTab === 'sys_prompts' ? 'max-w-6xl' : 'max-w-3xl'" class="bg-slate-900 border border-slate-700 w-full rounded-2xl shadow-2xl p-6 space-y-5 max-h-[90vh] flex flex-col transition-all duration-200">
+    <div @click.outside="openSettingsModal = false"
+         :class="{
+           'max-w-3xl': activeTab === 'bot',
+           'max-w-4xl': activeTab === 'pipelines' || activeTab === 'fields',
+           'max-w-5xl': activeTab === 'ai',
+           'max-w-6xl': activeTab === 'sys_prompts'
+         }"
+         class="bg-slate-900 border border-slate-700 w-full rounded-2xl shadow-2xl p-6 space-y-5 max-h-[90vh] flex flex-col transition-all duration-300 ease-out">
       <div class="flex items-center justify-between border-b border-slate-800 pb-3">
         <div>
           <h3 class="font-bold text-lg text-white flex items-center gap-2">
@@ -329,19 +336,19 @@ ADMIN_HTML = """<!DOCTYPE html>
         </div>
         <div class="flex items-center gap-2">
           <!-- Кнопка сохранения полей Экстрактора рядом с кнопкой синхронизации -->
-          <button x-show="activeTab === 'fields'" @click="saveFields()" :disabled="savingFields" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/30 text-xs font-semibold transition flex items-center gap-1.5 disabled:opacity-50" title="Сохранить настройки полей Экстрактора">
+          <button x-show="activeTab === 'fields'" x-transition:enter="transition ease-out duration-200" x-transition:enter-start="opacity-0 scale-95" x-transition:enter-end="opacity-100 scale-100" x-transition:leave="hidden" @click="saveFields()" :disabled="savingFields" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/30 text-xs font-semibold transition flex items-center gap-1.5 disabled:opacity-50" title="Сохранить настройки полей Экстрактора">
             <i class="fa-solid" :class="savingFields ? 'fa-spinner animate-spin' : 'fa-floppy-disk text-[11px]'"></i>
             <span x-text="savingFields ? 'Сохранение...' : 'Сохранить поля'"></span>
           </button>
 
           <!-- Кнопка сохранения воронок (если открыта вкладка воронок) -->
-          <button x-show="activeTab === 'pipelines'" @click="savePipelines()" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/30 text-xs font-semibold transition flex items-center gap-1.5" title="Сохранить выбранные воронки">
+          <button x-show="activeTab === 'pipelines'" x-transition:enter="transition ease-out duration-200" x-transition:enter-start="opacity-0 scale-95" x-transition:enter-end="opacity-100 scale-100" x-transition:leave="hidden" @click="savePipelines()" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/30 text-xs font-semibold transition flex items-center gap-1.5" title="Сохранить выбранные воронки">
             <i class="fa-solid fa-floppy-disk text-[11px]"></i>
             <span>Сохранить воронки</span>
           </button>
 
           <!-- Кнопка сохранения настроек ИИ (если открыта вкладка ИИ) -->
-          <button x-show="activeTab === 'ai' || activeTab === 'sys_prompts'" @click="saveAIConfig()" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/30 text-xs font-semibold transition flex items-center gap-1.5" title="Сохранить настройки ИИ">
+          <button x-show="activeTab === 'ai' || activeTab === 'sys_prompts'" x-transition:enter="transition ease-out duration-200" x-transition:enter-start="opacity-0 scale-95" x-transition:enter-end="opacity-100 scale-100" x-transition:leave="hidden" @click="saveAIConfig()" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/30 text-xs font-semibold transition flex items-center gap-1.5" title="Сохранить настройки ИИ">
             <i class="fa-solid fa-floppy-disk text-[11px]"></i>
             <span>Сохранить настройки ИИ</span>
           </button>
@@ -369,25 +376,25 @@ ADMIN_HTML = """<!DOCTYPE html>
 
       <!-- Tabs Navigation -->
       <div class="flex space-x-2 border-b border-slate-800 pb-2 text-xs font-medium">
-        <button @click="activeTab = 'bot'" :class="activeTab === 'bot' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white bg-slate-800'" class="px-3 py-1.5 rounded-lg transition">
+        <button @click="activeTab = 'bot'" :class="activeTab === 'bot' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white bg-slate-800'" class="px-3.5 py-1.5 rounded-lg transition-all duration-200 ease-out transform active:scale-95">
           <i class="fa-solid fa-robot mr-1"></i> 1. Привязка Salesbot
         </button>
-        <button @click="activeTab = 'pipelines'" :class="activeTab === 'pipelines' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white bg-slate-800'" class="px-3 py-1.5 rounded-lg transition">
+        <button @click="activeTab = 'pipelines'" :class="activeTab === 'pipelines' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white bg-slate-800'" class="px-3.5 py-1.5 rounded-lg transition-all duration-200 ease-out transform active:scale-95">
           <i class="fa-solid fa-filter mr-1"></i> 2. Воронки
         </button>
-        <button @click="activeTab = 'fields'" :class="activeTab === 'fields' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white bg-slate-800'" class="px-3 py-1.5 rounded-lg transition">
+        <button @click="activeTab = 'fields'" :class="activeTab === 'fields' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white bg-slate-800'" class="px-3.5 py-1.5 rounded-lg transition-all duration-200 ease-out transform active:scale-95">
           <i class="fa-solid fa-table-columns mr-1"></i> 3. Экстрактор полей
         </button>
-        <button @click="activeTab = 'ai'" :class="activeTab === 'ai' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white bg-slate-800'" class="px-3 py-1.5 rounded-lg transition">
+        <button @click="activeTab = 'ai'" :class="activeTab === 'ai' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white bg-slate-800'" class="px-3.5 py-1.5 rounded-lg transition-all duration-200 ease-out transform active:scale-95">
           <i class="fa-solid fa-brain mr-1"></i> 4. Промпт и ИИ
         </button>
-        <button @click="activeTab = 'sys_prompts'" :class="activeTab === 'sys_prompts' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white bg-slate-800'" class="px-3 py-1.5 rounded-lg transition">
+        <button @click="activeTab = 'sys_prompts'" :class="activeTab === 'sys_prompts' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white bg-slate-800'" class="px-3.5 py-1.5 rounded-lg transition-all duration-200 ease-out transform active:scale-95">
           <i class="fa-solid fa-gears mr-1"></i> 5. Системные промпты
         </button>
       </div>
 
       <!-- Tab 1: Salesbot -->
-      <div x-show="activeTab === 'bot'" class="space-y-4 flex-1 overflow-y-auto pr-1">
+      <div x-show="activeTab === 'bot'" x-transition:enter="transition-all ease-out duration-300" x-transition:enter-start="opacity-0 translate-y-2 scale-[0.98]" x-transition:enter-end="opacity-100 translate-y-0 scale-100" x-transition:leave="hidden" class="space-y-4 flex-1 overflow-y-auto pr-1">
         <div class="space-y-2">
           <label class="block text-xs font-medium text-slate-300">Выберите собранный Salesbot из amoCRM:</label>
           <div class="flex items-center space-x-2">
@@ -414,7 +421,7 @@ ADMIN_HTML = """<!DOCTYPE html>
       </div>
 
       <!-- Tab 2: Pipelines -->
-      <div x-show="activeTab === 'pipelines'" class="space-y-4 flex-1 overflow-y-auto pr-1">
+      <div x-show="activeTab === 'pipelines'" x-transition:enter="transition-all ease-out duration-300" x-transition:enter-start="opacity-0 translate-y-2 scale-[0.98]" x-transition:enter-end="opacity-100 translate-y-0 scale-100" x-transition:leave="hidden" class="space-y-4 flex-1 overflow-y-auto pr-1">
         <p class="text-xs text-slate-400">Отметьте воронки и этапы, на которых ИИ-менеджер отвечает клиентам (авто-движение сделок: 0 → 1 → 2 → 3 → 4):</p>
         <div class="space-y-3">
           <template x-for="p in pipelines" :key="p.amo_pipeline_id">
@@ -429,7 +436,7 @@ ADMIN_HTML = """<!DOCTYPE html>
               </label>
 
               <!-- Список этапов воронки с выбором, где отвечает ИИ -->
-              <div x-show="p.is_enabled && p.stages && p.stages.length > 0" class="pl-6 pt-2 border-t border-slate-700/70 space-y-1.5">
+              <div x-show="p.is_enabled && p.stages && p.stages.length > 0" x-transition:enter="transition ease-out duration-200" x-transition:enter-start="opacity-0 -translate-y-1" x-transition:enter-end="opacity-100 translate-y-0" class="pl-6 pt-2 border-t border-slate-700/70 space-y-1.5">
                 <div class="text-[11px] text-slate-400 mb-1 font-medium">Активные этапы для ответов ИИ (снимите галочку с этапа, где работает живой менеджер):</div>
                 <template x-for="(st, idx) in (p.stages || [])" :key="st.id">
                   <label class="flex items-center justify-between px-3 py-1.5 rounded-lg bg-slate-900/60 border border-slate-800 hover:border-slate-700 cursor-pointer">
@@ -454,7 +461,7 @@ ADMIN_HTML = """<!DOCTYPE html>
       </div>
 
       <!-- Tab 3: Fields Extractor -->
-      <div x-show="activeTab === 'fields'" class="space-y-4 flex-1 overflow-y-auto pr-1">
+      <div x-show="activeTab === 'fields'" x-transition:enter="transition-all ease-out duration-300" x-transition:enter-start="opacity-0 translate-y-2 scale-[0.98]" x-transition:enter-end="opacity-100 translate-y-0 scale-100" x-transition:leave="hidden" class="space-y-4 flex-1 overflow-y-auto pr-1">
         <p class="text-xs text-slate-400">Выберите поля сделки или контакта, которые ИИ-экстрактор будет извлекать из диалога и автоматически сохранять в CRM:</p>
         <div class="space-y-3">
           <template x-for="f in fields" :key="f.amo_field_id">
@@ -483,7 +490,7 @@ ADMIN_HTML = """<!DOCTYPE html>
                 </div>
                 <span class="text-xs text-slate-500" x-text="f.field_type + ' (ID: ' + f.amo_field_id + ')'"></span>
               </div>
-              <div x-show="f.is_enabled && !f.is_deleted_in_amo" class="grid grid-cols-1 md:grid-cols-2 gap-2 pt-1">
+              <div x-show="f.is_enabled && !f.is_deleted_in_amo" x-transition:enter="transition ease-out duration-200" x-transition:enter-start="opacity-0 -translate-y-1" x-transition:enter-end="opacity-100 translate-y-0" class="grid grid-cols-1 md:grid-cols-2 gap-2 pt-1">
                 <div>
                   <label class="text-[10px] text-slate-400">Подсказка для ИИ (что искать):</label>
                   <input type="text" x-model="f.ai_hint" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-white">
@@ -499,7 +506,7 @@ ADMIN_HTML = """<!DOCTYPE html>
       </div>
 
       <!-- Tab 4: AI Config -->
-      <div x-show="activeTab === 'ai'" class="space-y-4 flex-1 overflow-y-auto pr-1">
+      <div x-show="activeTab === 'ai'" x-transition:enter="transition-all ease-out duration-300" x-transition:enter-start="opacity-0 translate-y-2 scale-[0.98]" x-transition:enter-end="opacity-100 translate-y-0 scale-100" x-transition:leave="hidden" class="space-y-4 flex-1 overflow-y-auto pr-1">
         <!-- Секция: Google AI Studio (Gemini API Key аккаунта) -->
         <div class="p-3.5 bg-slate-800/90 border border-indigo-500/40 rounded-xl space-y-2">
           <div class="flex items-center justify-between">
@@ -649,7 +656,7 @@ ADMIN_HTML = """<!DOCTYPE html>
       </div>
 
       <!-- Tab 5: Системные промпты (3 колонки: Экстрактор и Общитель) -->
-      <div x-show="activeTab === 'sys_prompts'" class="space-y-4 flex-1 overflow-y-auto pr-1">
+      <div x-show="activeTab === 'sys_prompts'" x-transition:enter="transition-all ease-out duration-300" x-transition:enter-start="opacity-0 translate-y-2 scale-[0.98]" x-transition:enter-end="opacity-100 translate-y-0 scale-100" x-transition:leave="hidden" class="space-y-4 flex-1 overflow-y-auto pr-1">
         <div class="p-3 bg-slate-800/80 border border-slate-700 rounded-xl flex flex-wrap items-center justify-between gap-3">
           <div class="space-y-0.5">
             <div class="text-xs font-semibold text-indigo-300 flex items-center gap-1.5">
