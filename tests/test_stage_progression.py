@@ -166,6 +166,7 @@ class TestStageProgression(unittest.IsolatedAsyncioTestCase):
         mock_amo.patch_lead_status.assert_awaited_once_with(
             subdomain="testsub", access_token="tok", lead_id=12345, status_id=50
         )
+        mock_amo.create_operator_task.assert_not_called()
         self.assertTrue(lead_obj.handover_required)
         # Проверяем, что клиенту отправляется ответ Общителя (на языке клиента), а НЕ захардкоженная русская строка
         mock_amo.patch_lead_custom_fields.assert_awaited_with(

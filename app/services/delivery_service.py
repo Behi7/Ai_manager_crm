@@ -696,12 +696,8 @@ class DeliveryService:
                     lead_obj.stuck_count = 0
                     await db.commit()
 
-            task_text = (
-                "Клиент запросил оператора в чате."
-                if comm_resp.is_handover_requested
-                else f"ИИ не может решить вопрос клиента после {current_stuck_count} попыток. Подключитесь к диалогу."
-            )
-            # Перевод сделки на 4-й этап (индекс 4 — Handover / Требуется менеджер), если этапы синхронизированы
+            # Перевод сделки на 4-й этап (индекс 4 — Handover / Требуется менеджер), если этапы синхронизированы.
+            # Задачи и уведомления менеджерам настраиваются гибко через триггеры самой воронки amoCRM на этом этапе.
             if active_pipeline:
                 p_stages = getattr(active_pipeline, "stages_json", None)
                 if isinstance(p_stages, list) and p_stages:
@@ -715,13 +711,6 @@ class DeliveryService:
                             lead_id=amo_lead_id,
                             status_id=target_status_id,
                         )
-
-            await amocrm_client.create_operator_task(
-                subdomain=subdomain,
-                access_token=access_token,
-                element_id=amo_lead_id,
-                text=task_text
-            )
         else:
             # 5.8. Автоматическое продвижение сделки по этапам воронки (0 -> 1 -> 2 -> 3) ДО записи Ответ ИИ и запуска Salesbot
             try:
