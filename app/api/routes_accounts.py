@@ -12,7 +12,11 @@ from app.core.config import settings
 from app.core.auth import verify_admin_key
 from app.core.database import AsyncSessionLocal
 from app.core.security import encrypt_token, decrypt_token
-from app.models.account import Account, AccountStatus, Pipeline, FieldMapping, AIConfig, DEFAULT_COMMENT_PROMPT
+from app.models.account import (
+    Account, AccountStatus, Pipeline, FieldMapping, AIConfig,
+    DEFAULT_COMMENT_PROMPT, DEFAULT_EXTRACTOR_SYSTEM_PROMPT,
+    DEFAULT_COMMUNICATOR_QUALIFICATION_PROMPT, DEFAULT_COMMUNICATOR_RULES_PROMPT
+)
 from app.services.amocrm_client import amocrm_client, AmoCRMAuthOrBillingError
 from app.services.debounce_service import debounce_service
 
@@ -80,6 +84,9 @@ class UpdateAIConfigRequest(BaseModel):
     knowledge_mode: Optional[str] = None
     comment_prompt: Optional[str] = None
     direct_link: Optional[str] = None
+    extractor_system_prompt: Optional[str] = None
+    communicator_qualification_prompt: Optional[str] = None
+    communicator_rules_prompt: Optional[str] = None
 
 
 # --- Endpoints ---
@@ -946,7 +953,10 @@ async def get_ai_config(account_id: uuid.UUID):
             "knowledge_mode": cfg.knowledge_mode or "plain_text",
             "gemini_cache_name": cfg.gemini_cache_name,
             "comment_prompt": cfg.comment_prompt or DEFAULT_COMMENT_PROMPT,
-            "direct_link": cfg.direct_link or ""
+            "direct_link": cfg.direct_link or "",
+            "extractor_system_prompt": getattr(cfg, "extractor_system_prompt", None) or DEFAULT_EXTRACTOR_SYSTEM_PROMPT,
+            "communicator_qualification_prompt": getattr(cfg, "communicator_qualification_prompt", None) or DEFAULT_COMMUNICATOR_QUALIFICATION_PROMPT,
+            "communicator_rules_prompt": getattr(cfg, "communicator_rules_prompt", None) or DEFAULT_COMMUNICATOR_RULES_PROMPT,
         }
 
 
@@ -999,6 +1009,12 @@ async def update_ai_config(account_id: uuid.UUID, payload: UpdateAIConfigRequest
             cfg.comment_prompt = payload.comment_prompt.strip() if payload.comment_prompt.strip() else None
         if payload.direct_link is not None:
             cfg.direct_link = payload.direct_link.strip() if payload.direct_link.strip() else None
+        if payload.extractor_system_prompt is not None:
+            cfg.extractor_system_prompt = payload.extractor_system_prompt.strip() or DEFAULT_EXTRACTOR_SYSTEM_PROMPT
+        if payload.communicator_qualification_prompt is not None:
+            cfg.communicator_qualification_prompt = payload.communicator_qualification_prompt.strip() or DEFAULT_COMMUNICATOR_QUALIFICATION_PROMPT
+        if payload.communicator_rules_prompt is not None:
+            cfg.communicator_rules_prompt = payload.communicator_rules_prompt.strip() or DEFAULT_COMMUNICATOR_RULES_PROMPT
 
         saved_delay = float(getattr(cfg, "debounce_delay_seconds", None) or 2.5)
         await session.commit()

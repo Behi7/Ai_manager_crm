@@ -575,6 +575,8 @@ class DeliveryService:
                 logger.warning(f"Не удалось создать/обновить Gemini Context Cache: {cache_err}")
 
         # 5. Внешний HTTP-вызов: Генерация ответа в Gemini (БЕЗ сессии БД!)
+        comm_qual_prompt = getattr(ai_config, "communicator_qualification_prompt", None) if ai_config else None
+        comm_rules_prompt = getattr(ai_config, "communicator_rules_prompt", None) if ai_config else None
         comm_resp = await communicator.generate_reply(
             system_prompt=prompt,
             messages=history_payload,
@@ -589,7 +591,9 @@ class DeliveryService:
             gemini_cache_name=gemini_cache_name,
             is_comment=is_comment_lead,
             direct_link=direct_link,
-            api_key=account_gemini_key
+            api_key=account_gemini_key,
+            qualification_prompt=comm_qual_prompt,
+            rules_prompt=comm_rules_prompt
         )
 
         if comm_resp.media_summary:
@@ -791,6 +795,7 @@ class DeliveryService:
             account_gemini_key = (getattr(ai_config, "gemini_api_key", None) or "").strip() or None
             ext_model = ai_config.extractor_model if ai_config else "gemini-3.1-flash-lite"
             fallback_ext_model = ai_config.fallback_extractor_model if ai_config and ai_config.fallback_extractor_model else "gemini-2.5-flash"
+            ext_sys_prompt = getattr(ai_config, "extractor_system_prompt", None) if ai_config else None
             ext_result = await extractor.extract_lead_fields(
                 field_mappings=account.field_mappings,
                 messages=full_dialog,
@@ -798,7 +803,8 @@ class DeliveryService:
                 model_name=ext_model,
                 fallback_model=fallback_ext_model,
                 media_parts=media_parts,
-                api_key=account_gemini_key
+                api_key=account_gemini_key,
+                system_prompt=ext_sys_prompt
             )
 
             if ext_result.fields_to_update:

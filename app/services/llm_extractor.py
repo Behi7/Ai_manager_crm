@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import httpx
 from app.core.config import settings
 from app.services.gemini_client import gemini_http_client
-from app.models.account import FieldMapping
+from app.models.account import FieldMapping, DEFAULT_EXTRACTOR_SYSTEM_PROMPT
 
 logger = logging.getLogger("LLMExtractor")
 
@@ -56,6 +56,7 @@ class LLMExtractor:
         fallback_model: Optional[str] = None,
         media_parts: Optional[List[Dict[str, Any]]] = None,
         api_key: Optional[str] = None,
+        system_prompt: Optional[str] = None,
     ) -> ExtractionResult:
         """
         Извлекает значения полей сделки из диалога с клиентом и медиавложений.
@@ -126,18 +127,11 @@ class LLMExtractor:
             for m in messages
         ])
 
+        base_ext_prompt = (system_prompt or "").strip() or DEFAULT_EXTRACTOR_SYSTEM_PROMPT
         system_instruction = (
-            "Ты — аналитик CRM. Твоя задача — внимательно изучить диалог между Клиентом и Менеджером, "
-            "а также прикрепленные медиафайлы (голосовые сообщения, кругляшки, фото чеков/товаров) "
-            "и извлечь ТОЧНЫЕ факты о клиенте и его запросе для сохранения в CRM.\n\n"
-            "Список доступных полей для извлечения:\n"
-            f"{fields_doc}\n\n"
-            "ПРАВИЛА:\n"
-            "1. Извлекай только ту информацию, о которой клиент явно сообщил сам или подтвердил слова менеджера.\n"
-            "2. ВНИМАНИЕ: Если у поля уже указано 'Текущее значение в CRM' (не ПУСТО), и клиент в ПОСЛЕДНЕМ сообщении явно НЕ исправлял и НЕ менял это значение на другое — ОБЯЗАТЕЛЬНО верни null (или не включай это поле в результат)! Категорически запрещено повторно извлекать или перефразировать старые ответы из истории диалога, которые уже записаны в CRM.\n"
-            "3. Если поле не упоминалось или нет уверенности — НЕ добавляй его в результат или укажи null.\n"
-            "4. Не придумывай и не домысливай факты.\n"
-            "5. Верни JSON-объект, где ключи — это строго идентификаторы полей (например field_lead_12345), а значения — только НОВЫЕ или ИЗМЕНЕННЫЕ данные."
+            f"{base_ext_prompt}\n\n"
+            "Список доступных полей для извлечения (Available CRM fields to extract):\n"
+            f"{fields_doc}"
         )
 
         user_content = f"Диалог:\n{conv_text}\n\nИзвлеки все релевантные поля."

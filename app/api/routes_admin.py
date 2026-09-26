@@ -318,7 +318,7 @@ ADMIN_HTML = """<!DOCTYPE html>
 
   <!-- MODAL: Детальная настройка аккаунта (Боты, Воронки, Поля Экстрактора, Промпт ИИ) -->
   <div x-show="openSettingsModal" x-cloak class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" x-transition>
-    <div @click.outside="openSettingsModal = false" class="bg-slate-900 border border-slate-700 max-w-3xl w-full rounded-2xl shadow-2xl p-6 space-y-5 max-h-[90vh] flex flex-col">
+    <div @click.outside="openSettingsModal = false" :class="activeTab === 'sys_prompts' ? 'max-w-6xl' : 'max-w-3xl'" class="bg-slate-900 border border-slate-700 w-full rounded-2xl shadow-2xl p-6 space-y-5 max-h-[90vh] flex flex-col transition-all duration-200">
       <div class="flex items-center justify-between border-b border-slate-800 pb-3">
         <div>
           <h3 class="font-bold text-lg text-white flex items-center gap-2">
@@ -341,7 +341,7 @@ ADMIN_HTML = """<!DOCTYPE html>
           </button>
 
           <!-- Кнопка сохранения настроек ИИ (если открыта вкладка ИИ) -->
-          <button x-show="activeTab === 'ai'" @click="saveAIConfig()" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/30 text-xs font-semibold transition flex items-center gap-1.5" title="Сохранить настройки ИИ">
+          <button x-show="activeTab === 'ai' || activeTab === 'sys_prompts'" @click="saveAIConfig()" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/30 text-xs font-semibold transition flex items-center gap-1.5" title="Сохранить настройки ИИ">
             <i class="fa-solid fa-floppy-disk text-[11px]"></i>
             <span>Сохранить настройки ИИ</span>
           </button>
@@ -380,6 +380,9 @@ ADMIN_HTML = """<!DOCTYPE html>
         </button>
         <button @click="activeTab = 'ai'" :class="activeTab === 'ai' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white bg-slate-800'" class="px-3 py-1.5 rounded-lg transition">
           <i class="fa-solid fa-brain mr-1"></i> 4. Промпт и ИИ
+        </button>
+        <button @click="activeTab = 'sys_prompts'" :class="activeTab === 'sys_prompts' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white bg-slate-800'" class="px-3 py-1.5 rounded-lg transition">
+          <i class="fa-solid fa-gears mr-1"></i> 5. Системные промпты
         </button>
       </div>
 
@@ -644,10 +647,137 @@ ADMIN_HTML = """<!DOCTYPE html>
           </div>
         </div>
       </div>
+
+      <!-- Tab 5: Системные промпты (3 колонки: Экстрактор и Общитель) -->
+      <div x-show="activeTab === 'sys_prompts'" class="space-y-4 flex-1 overflow-y-auto pr-1">
+        <div class="p-3 bg-slate-800/80 border border-slate-700 rounded-xl flex flex-wrap items-center justify-between gap-3">
+          <div class="space-y-0.5">
+            <div class="text-xs font-semibold text-indigo-300 flex items-center gap-1.5">
+              <i class="fa-solid fa-microchip text-indigo-400"></i>
+              <span>Системные инструкции ядра (индивидуально для этого аккаунта)</span>
+            </div>
+            <div class="text-[11px] text-slate-400">
+              Динамические списки полей amoCRM, текущие значения сделки и база знаний подставляются автоматически. Вы можете задать правила на русском или английском языке.
+            </div>
+          </div>
+          <div class="flex items-center gap-2">
+            <button type="button" @click="applySystemPromptsPreset('ru')" class="px-2.5 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-[11px] text-slate-200 font-medium transition flex items-center gap-1" title="Загрузить стандартные системные промпты на русском языке">
+              <span>🇷🇺 Шаблон RU</span>
+            </button>
+            <button type="button" @click="applySystemPromptsPreset('en')" class="px-2.5 py-1.5 rounded-lg bg-indigo-950/80 hover:bg-indigo-900 border border-indigo-700/60 text-[11px] text-indigo-200 font-medium transition flex items-center gap-1" title="Загрузить системные промпты на английском языке (English)">
+              <span>🇬🇧 Шаблон EN</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <!-- Колонка 1: Экстрактор -->
+          <div class="p-3.5 bg-slate-800/60 border border-slate-700 rounded-xl flex flex-col space-y-2">
+            <div class="flex items-center justify-between">
+              <label class="text-xs font-semibold text-emerald-300 flex items-center gap-1.5">
+                <i class="fa-solid fa-filter-circle-dollar text-emerald-400"></i>
+                <span>1. Промпт Экстрактора (CRM)</span>
+              </label>
+              <span class="text-[10px] px-2 py-0.5 rounded bg-emerald-950/70 text-emerald-300 border border-emerald-800/50">Экстрактор</span>
+            </div>
+            <div class="text-[11px] text-slate-400 leading-relaxed">
+              Отвечает за извлечение полей сделки и контакта в JSON, распознавание настоящего имени из ника Telegram/Instagram и защиту уже заполненных полей от перезаписи.
+            </div>
+            <textarea x-model="aiConfig.extractor_system_prompt" rows="16"
+                      class="w-full flex-1 bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs font-mono text-slate-200 outline-none focus:border-emerald-500 leading-relaxed"></textarea>
+          </div>
+
+          <!-- Колонка 2: Общитель (Квалификация) -->
+          <div class="p-3.5 bg-slate-800/60 border border-slate-700 rounded-xl flex flex-col space-y-2">
+            <div class="flex items-center justify-between">
+              <label class="text-xs font-semibold text-amber-300 flex items-center gap-1.5">
+                <i class="fa-solid fa-clipboard-check text-amber-400"></i>
+                <span>2. Квалификация и Анкета</span>
+              </label>
+              <span class="text-[10px] px-2 py-0.5 rounded bg-amber-950/70 text-amber-300 border border-amber-800/50">Общитель</span>
+            </div>
+            <div class="text-[11px] text-slate-400 leading-relaxed">
+              Управляет сбором целевых полей: правило одного вопроса за сообщение, запрет преждевременного завершения диалога пока анкета не заполнена, и финал квалификации.
+            </div>
+            <textarea x-model="aiConfig.communicator_qualification_prompt" rows="16"
+                      class="w-full flex-1 bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs font-mono text-slate-200 outline-none focus:border-amber-500 leading-relaxed"></textarea>
+          </div>
+
+          <!-- Колонка 3: Общитель (Правила продаж, Каталог и Вывод) -->
+          <div class="p-3.5 bg-slate-800/60 border border-slate-700 rounded-xl flex flex-col space-y-2">
+            <div class="flex items-center justify-between">
+              <label class="text-xs font-semibold text-sky-300 flex items-center gap-1.5">
+                <i class="fa-solid fa-comments-dollar text-sky-400"></i>
+                <span>3. Продажи, Каталог и Вывод</span>
+              </label>
+              <span class="text-[10px] px-2 py-0.5 rounded bg-sky-950/70 text-sky-300 border border-sky-800/50">Общитель</span>
+            </div>
+            <div class="text-[11px] text-slate-400 leading-relaxed">
+              Поведение активного менеджера продаж на приветствие («Salom/Привет»), правила презентации каталога, разделение данных клиента и компании, краткость и язык ответа.
+            </div>
+            <textarea x-model="aiConfig.communicator_rules_prompt" rows="16"
+                      class="w-full flex-1 bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs font-mono text-slate-200 outline-none focus:border-sky-500 leading-relaxed"></textarea>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
   <script>
+    const DEFAULT_SYS_PROMPTS_RU = {
+      extractor: `Ты — аналитик CRM. Твоя задача — внимательно изучить диалог между Клиентом и Менеджером, а также прикрепленные медиафайлы (голосовые сообщения, кругляшки, фото чеков/товаров) и извлечь ТОЧНЫЕ факты о клиенте и его запросе для сохранения в CRM.
+
+ПРАВИЛА:
+1. Извлекай только ту информацию, о которой клиент явно сообщил сам или подтвердил слова менеджера.
+2. ВНИМАНИЕ: Если у поля уже указано 'Текущее значение в CRM' (не ПУСТО), и клиент в ПОСЛЕДНЕМ сообщении явно НЕ исправлял и НЕ менял это значение на другое — ОБЯЗАТЕЛЬНО верни null (или не включай это поле в результат)! Категорически запрещено повторно извлекать или перефразировать старые ответы из истории диалога, которые уже записаны в CRM.
+3. ПРАВИЛО ДЛЯ ИМЕНИ КОНТАКТА (field_contact_sys_name): Если клиент назвал своё имя в диалоге — верни это имя. Если в диалоге ещё не называл, посмотри на ник мессенджера: если там написано настоящее человеческое имя (например Salohiddin, Алишер, Hojiakbar, Дильшод) — верни это имя! Если же в нике написано название компании/отдела (Texnik Bo'lim, Marketing Markazi, магазин) или случайный набор символов (йцуке123, user777, смайлики) — НЕ используй ник и верни null!
+4. Если поле не упоминалось или нет уверенности — НЕ добавляй его в результат или укажи null.
+5. Не придумывай и не домысливай факты.
+6. Верни JSON-объект, где ключи — это строго идентификаторы полей (например field_lead_12345), а значения — только НОВЫЕ или ИЗМЕНЕННЫЕ данные.`,
+      qualification: `СТРОГИЕ ПРАВИЛА КВАЛИФИКАЦИИ И ОБЩЕНИЯ (ФАЗА СБОРА ДАННЫХ):
+1. ⚠️ ВНИМАНИЕ — КВАЛИФИКАЦИЯ ЕЩЁ НЕ ЗАВЕРШЕНА! Пока список целевых данных выше не пуст, КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО говорить клиенту, что «все данные записаны», «специалисты скоро свяжутся» или спрашивать «есть ли у вас ещё вопросы?» (это условие из системного промпта действует ТОЛЬКО когда список целевых данных пуст!).
+2. ПРАВИЛО ОДНОГО ВОПРОСА: Задавай максимум ОДИН ненавязчивый вопрос в сообщении! (по одному из недостающих параметров из списка выше). Категорически запрещено присылать списки вопросов, анкеты или опросники.
+3. СНАЧАЛА ПОЛЬЗА/ОТВЕТ, ЗАТЕМ ВОПРОС: Всегда сначала дай полноценный, дружелюбный ответ на вопрос или реплику клиента, и только затем органично задай уместный вопрос по одному недостающему параметру из списка выше.
+4. НЕ ПЕРЕСПРАШИВАЙ: Если клиент уже сообщил информацию или она указана в уже известных данных, не спрашивай повторно — спрашивай только недостающие целевые параметры из списка выше.
+5. ЗАВЕРШЕНИЕ КВАЛИФИКАЦИИ: Когда все ключевые квалификационные параметры сделки уже выяснены (список целевых данных пуст) — больше НЕ задавай квалификационных вопросов по анкете. Поблагодари клиента, сообщи что все данные записаны и специалисты свяжутся с ним в скором времени, и спроси, остались ли у него вопросы.`,
+      rules: `ПРАВИЛА РАБОТЫ С КАТАЛОГОМ И СТРОЖАЙШИЕ ПРАВИЛА ВЫВОДА:
+1. СТРОГИЙ ЗАПРЕТ НА СПАМ КАТАЛОГОМ И ПОВЕДЕНИЕ ПРОДАЖНИКА НА ПРИВЕТСТВИЕ: Если клиент просто поздоровался ('Привет', 'Salom', 'Assalomu alaykum') — НЕ вываливай сразу весь прайс-лист, но и КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО отвечать шаблонной фразой справочной службы «Чем я могу вам помочь?» / «Sizga qanday yordam bera olaman?». Ты — активный менеджер по продажам! Поздоровайся (по имени, если оно известно), в 1 короткой фразе обозначь направление компании (согласно системному промпту) и сразу перехвати инициативу: задай первый живой вопрос по квалификации клиента из списка целевых данных.
+2. ТОЧЕЧНАЯ РЕКОМЕНДАЦИЯ И ВЫГОДА: Рекомендуй конкретный продукт (1, максимум 2 подходящих варианта) только тогда, когда клиент сам спросил о товарах/ценах или когда стали понятны его потребности. Называй цены и характеристики строго из базы знаний.
+3. ДАННЫЕ КЛИЕНТА ≠ КОНТАКТЫ КОМПАНИИ: Данные из блока «УЖЕ ИЗВЕСТНЫЕ ДАННЫЕ О КЛИЕНТЕ И СДЕЛКЕ» — это анкетные данные САМОГО КЛИЕНТА. Никогда не выдавай телефон клиента за номер нашей компании.
+4. СТРОЖАЙШИЕ ПРАВИЛА ВЫВОДА:
+   - Запрещено использовать плейсхолдеры в квадратных скобках вида [цена], [имя], [товар]. Если точная информация неизвестна, ответь как живой менеджер: скажи, что уточняешь детали у коллег, либо задай уточняющий вопрос.
+   - Не здоровайся повторно, если в диалоге уже есть приветствие.
+   - Будь лаконичным (1-3 живых, емких предложения), дружелюбным и естественным.
+   - Отвечай строго на том языке, на котором пишет или говорит клиент (русский, узбекский или английский).`
+    };
+
+    const DEFAULT_SYS_PROMPTS_EN = {
+      extractor: `You are a CRM Data Analyst. Carefully analyze the conversation between the Client and the Manager, including any attached media (voice notes, video messages, images/receipts), and extract EXACT facts about the client and their request to save into amoCRM.
+
+RULES:
+1. Extract only facts explicitly stated or confirmed by the client.
+2. IMPORTANT: If a field already has a 'Current value in CRM' (not EMPTY), and the client did NOT explicitly change or correct it in the LATEST message — MUST return null (or omit the field)! Never re-extract or paraphrase old answers already saved in CRM.
+3. CONTACT NAME RULE (field_contact_sys_name): If the client stated their name in the chat — return it. If not yet stated in chat, check the messenger nickname: if it is a real human first name (e.g. Salohiddin, Alisher, Hojiakbar, Dilshod) — return that name! If the nickname is a company/department name (e.g. Texnik Bo'lim, Marketing Markazi, Shop) or random characters/digits (e.g. qwerty123, user777, emojis) — DO NOT use the nickname and return null!
+4. If a field was not mentioned or you are unsure — return null.
+5. Never invent or guess facts.
+6. Return a JSON object where keys are strictly the field IDs (e.g. field_lead_12345) and values are ONLY NEW or UPDATED facts.`,
+      qualification: `STRICT LEAD QUALIFICATION & SALES RULES (DATA COLLECTION PHASE):
+1. ⚠️ QUALIFICATION IN PROGRESS: As long as the Target Fields list above is NOT empty, it is STRICTLY FORBIDDEN to tell the client that "all details are recorded", "our specialists will contact you soon", or ask "do you have any other questions?" (only say that when the Target Fields list is completely empty!).
+2. ONE QUESTION RULE: Ask at most ONE natural qualification question per message (from the missing Target Fields list). Never send questionnaires or bulleted lists of questions.
+3. VALUE FIRST, THEN QUESTION: Always give a helpful, friendly answer to the client's message or question first, and then smoothly ask one relevant qualification question.
+4. DO NOT RE-ASK: Never re-ask information already listed in the Known Client Data section — only ask what remains in the Target Fields list.
+5. QUALIFICATION COMPLETION: Only when all Target Fields are collected (the Target Fields list is empty) — stop asking qualification questions, thank the client, confirm their request is passed to a specialist who will contact them shortly, and ask if they have any final questions.`,
+      rules: `CATALOG USAGE & STRICT OUTPUT RULES:
+1. PROACTIVE SALES GREETING (NO GENERIC SUPPORT PHRASES): When a client simply says hello ('Salom', 'Assalomu alaykum', 'Привет', 'Hi') — do NOT dump the entire price list, and NEVER reply with a passive helpdesk phrase like "How can I help you?" / "Sizga qanday yordam bera olaman?". You are an active Sales Manager! Greet them (by name if known), briefly state what our company does in 1 short sentence (per the main persona prompt), and immediately take the initiative by asking the first natural qualification question.
+2. TARGETED RECOMMENDATIONS: Recommend 1-2 specific products/services with clear benefits only when the client asks about prices/services or their needs become clear. Use exact prices and specs from the Knowledge Base.
+3. CLIENT DATA ≠ COMPANY CONTACTS: Fields in "KNOWN CLIENT DATA" belong to the CLIENT, not our company. Never give the client's own phone number as our company's contact number.
+4. STRICT OUTPUT FORMAT:
+   - Never output bracketed placeholders like [price], [name], [product].
+   - Do not greet again if the conversation is already underway.
+   - Keep replies concise (1-3 natural sentences), warm, and human-like.
+   - Reply strictly in the exact same language the client used (Uzbek, Russian, or English).`
+    };
+
     const DEFAULT_COMMENT_PROMPT_TEXT = `Ты — вежливый и дружелюбный ИИ-менеджер. Твоя задача — отвечать на комментарии клиентов под постами и Reels в соцсетях.
 
 ПРАВИЛА ОТВЕТА:
@@ -691,7 +821,10 @@ ADMIN_HTML = """<!DOCTYPE html>
           knowledge_base: '',
           knowledge_mode: 'plain_text',
           comment_prompt: DEFAULT_COMMENT_PROMPT_TEXT,
-          direct_link: ''
+          direct_link: '',
+          extractor_system_prompt: DEFAULT_SYS_PROMPTS_RU.extractor,
+          communicator_qualification_prompt: DEFAULT_SYS_PROMPTS_RU.qualification,
+          communicator_rules_prompt: DEFAULT_SYS_PROMPTS_RU.rules
         },
         form: {
           subdomain: '',
@@ -1021,11 +1154,21 @@ ADMIN_HTML = """<!DOCTYPE html>
             if (!data.direct_link) data.direct_link = '';
             if (!data.debounce_delay_seconds) data.debounce_delay_seconds = 2.5;
             if (typeof data.gemini_api_key !== 'string') data.gemini_api_key = '';
+            if (!data.extractor_system_prompt) data.extractor_system_prompt = DEFAULT_SYS_PROMPTS_RU.extractor;
+            if (!data.communicator_qualification_prompt) data.communicator_qualification_prompt = DEFAULT_SYS_PROMPTS_RU.qualification;
+            if (!data.communicator_rules_prompt) data.communicator_rules_prompt = DEFAULT_SYS_PROMPTS_RU.rules;
             this.showGeminiKey = false;
             this.aiConfig = data;
           } catch (e) {
             console.error('Ошибка загрузки настроек ИИ:', e);
           }
+        },
+        applySystemPromptsPreset(lang) {
+          const preset = lang === 'en' ? DEFAULT_SYS_PROMPTS_EN : DEFAULT_SYS_PROMPTS_RU;
+          this.aiConfig.extractor_system_prompt = preset.extractor;
+          this.aiConfig.communicator_qualification_prompt = preset.qualification;
+          this.aiConfig.communicator_rules_prompt = preset.rules;
+          this.showToast(lang === 'en' ? 'Загружен шаблон системных промптов (EN). Нажмите «Сохранить настройки ИИ».' : 'Загружен шаблон системных промптов (RU). Нажмите «Сохранить настройки ИИ».');
         },
         async saveAIConfig() {
           try {

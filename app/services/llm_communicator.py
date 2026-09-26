@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import httpx
 from app.core.config import settings
 from app.services.gemini_client import gemini_http_client
+from app.models.account import DEFAULT_COMMUNICATOR_QUALIFICATION_PROMPT, DEFAULT_COMMUNICATOR_RULES_PROMPT
 
 logger = logging.getLogger("LLMCommunicator")
 
@@ -65,6 +66,8 @@ class LLMCommunicator:
         is_comment: bool = False,
         direct_link: Optional[str] = None,
         api_key: Optional[str] = None,
+        qualification_prompt: Optional[str] = None,
+        rules_prompt: Optional[str] = None,
     ) -> CommunicatorResponse:
         """
         Генерация ответа клиенту на основе истории сообщений, мультимодальных вложений
@@ -103,6 +106,7 @@ class LLMCommunicator:
                 )
 
         # 2. Формирование блока целевых параметров для квалификации (FieldMapping)
+        base_qual_prompt = (qualification_prompt or "").strip() or DEFAULT_COMMUNICATOR_QUALIFICATION_PROMPT
         qualification_instruction = ""
         if target_fields:
             target_lines = [f"- {f.get('name')}: {f.get('hint', '')}" for f in target_fields if f.get('name')]
@@ -110,15 +114,8 @@ class LLMCommunicator:
                 qualification_instruction = (
                     "\n\nЦЕЛЕВЫЕ ДАННЫЕ, КОТОРЫЕ НУЖНО ВЫЯСНИТЬ У КЛИЕНТА (КВАЛИФИКАЦИЯ):\n"
                     + "\n".join(target_lines)
-                    + "\n\nСТРОГИЕ ПРАВИЛА КВАЛИФИКАЦИИ И ОБЩЕНИЯ (ФАЗА СБОРА ДАННЫХ):\n"
-                    "1. ⚠️ ВНИМАНИЕ — КВАЛИФИКАЦИЯ ЕЩЁ НЕ ЗАВЕРШЕНА! В списке выше остались незаполненные поля. "
-                    "Пока этот список не пуст, КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО говорить клиенту, что «все данные записаны», «специалисты скоро свяжутся» "
-                    "или спрашивать «есть ли у вас ещё вопросы?» (это условие из системного промпта действует ТОЛЬКО когда список целевых данных пуст!).\n"
-                    "2. ПРАВИЛО ОДНОГО ВОПРОСА: Задавай максимум ОДИН ненавязчивый вопрос в сообщении! (по одному из недостающих параметров из списка выше). "
-                    "Категорически запрещено присылать списки вопросов, анкеты или опросники.\n"
-                    "3. СНАЧАЛА ПОЛЬЗА/ОТВЕТ, ЗАТЕМ ВОПРОС: Всегда сначала дай полноценный, дружелюбный ответ на вопрос или реплику клиента, "
-                    "и только затем органично задай уместный вопрос по одному недостающему параметру из списка выше.\n"
-                    "4. НЕ ПЕРЕСПРАШИВАЙ: Если клиент уже сообщил информацию или она указана в уже известных данных, не спрашивай повторно — спрашивай только то, что осталось в списке «ЦЕЛЕВЫЕ ДАННЫЕ, КОТОРЫЕ НУЖНО ВЫЯСНИТЬ»."
+                    + "\n\n"
+                    + base_qual_prompt
                 )
         elif known_info and (lead_context or known_fields):
             qualification_instruction = (
@@ -177,6 +174,7 @@ class LLMCommunicator:
         if direct_link:
             formatted_system_prompt = formatted_system_prompt.replace("{direct_link}", direct_link)
 
+        base_rules_prompt = (rules_prompt or "").strip() or DEFAULT_COMMUNICATOR_RULES_PROMPT
         full_system_instruction = (
             f"{formatted_system_prompt}\n"
             f"{knowledge_instruction}"
@@ -184,12 +182,7 @@ class LLMCommunicator:
             f"{qualification_instruction}"
             f"{comment_instruction}"
             f"{media_instruction}\n\n"
-            "СТРОЖАЙШИЕ ПРАВИЛА ВЫВОДА:\n"
-            "1. Запрещено использовать плейсхолдеры в квадратных скобках вида [цена], [имя], [товар]. "
-            "Если точная информация неизвестна, ответь как живой менеджер: скажи, что уточняешь детали у склада/коллег, либо задай уточняющий вопрос.\n"
-            "2. Не здоровайся повторно, если в диалоге уже есть приветствие.\n"
-            "3. Будь лаконичным (1-3 живых, емких предложения), дружелюбным и естественным.\n"
-            "4. Отвечай строго на том языке, на котором пишет или говорит клиент (русский или узбекский)."
+            f"{base_rules_prompt}"
         )
 
         # Формируем contents для Gemini API
