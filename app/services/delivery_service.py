@@ -382,8 +382,10 @@ class DeliveryService:
                     lead = (await db.execute(lead_stmt)).scalar_one()
 
             if lead.handover_required:
-                logger.info(f"Лид {amo_lead_id} уже переведен на оператора (handover_required=True). Пропуск ответа ИИ.")
-                return
+                logger.info(
+                    f"Лид {amo_lead_id} ранее имел handover_required=True, но текущий этап воронки разрешен в настройках. ИИ продолжает диалог."
+                )
+                lead.handover_required = False
 
             lead_db_id = lead.id
             current_stuck_count = lead.stuck_count or 0
@@ -650,6 +652,7 @@ class DeliveryService:
                 logger.warning(f"Не удалось создать/обновить Gemini Context Cache: {cache_err}")
 
         # 5. Внешний HTTP-вызов: Генерация ответа в Gemini (БЕЗ сессии БД!)
+        is_stuck_threshold = current_stuck_count >= handover_limit
         comm_qual_prompt = getattr(ai_config, "communicator_qualification_prompt", None) if ai_config else None
         comm_rules_prompt = getattr(ai_config, "communicator_rules_prompt", None) if ai_config else None
         comm_resp = await communicator.generate_reply(
@@ -668,7 +671,8 @@ class DeliveryService:
             direct_link=direct_link,
             api_key=account_gemini_key,
             qualification_prompt=comm_qual_prompt,
-            rules_prompt=comm_rules_prompt
+            rules_prompt=comm_rules_prompt,
+            force_handover=is_stuck_threshold,
         )
 
         if comm_resp.media_summary:
@@ -682,13 +686,14 @@ class DeliveryService:
                     await db.commit()
 
         # Проверка условий Handover
-        is_stuck_threshold = current_stuck_count >= handover_limit
-        if comm_resp.is_handover_requested or is_stuck_threshold:
+        is_handover_triggered = bool(comm_resp.is_handover_requested or is_stuck_threshold)
+        if is_handover_triggered:
             logger.info(f"Инициирован Handover для лида {amo_lead_id} (запрос={comm_resp.is_handover_requested}, stuck={current_stuck_count})")
             async with self._session_scope(session) as db:
                 lead_obj = (await db.execute(select(Lead).where(Lead.id == lead_db_id))).scalar_one_or_none()
                 if lead_obj:
                     lead_obj.handover_required = True
+                    lead_obj.stuck_count = 0
                     await db.commit()
 
             task_text = (
@@ -717,54 +722,24 @@ class DeliveryService:
                 element_id=amo_lead_id,
                 text=task_text
             )
-
-            handover_notice = "Переключаю вас на менеджера. Специалист скоро подключится к диалогу!"
-            reply_field_id = account.ai_reply_field_id
-            if not reply_field_id:
-                logger.error(f"У аккаунта {account_id_str} отсутствует ai_reply_field_id! Доставка отменена.")
-                return
-            patch_items = [{"field_id": reply_field_id, "values": [{"value": handover_notice}]}]
-            patch_ok = await amocrm_client.patch_lead_custom_fields(
-                subdomain=subdomain,
-                access_token=access_token,
-                lead_id=amo_lead_id,
-                fields=patch_items
-            )
-            if patch_ok:
-                await amocrm_client.run_salesbot(
+        else:
+            # 5.8. Автоматическое продвижение сделки по этапам воронки (0 -> 1 -> 2 -> 3) ДО записи Ответ ИИ и запуска Salesbot
+            try:
+                await self._advance_pipeline_stage(
+                    account=account,
+                    amo_lead_id=amo_lead_id,
                     subdomain=subdomain,
                     access_token=access_token,
-                    bot_id=account.bot_id,
-                    entity_id=amo_lead_id
+                    amo_cf_values=amo_cf_values,
+                    extracted_items=extracted_items_pre,
+                    disabled_field_keys=disabled_field_keys_pre,
+                    active_pipeline=active_pipeline,
+                    lead_amo_data=lead_amo_data,
                 )
-                async with self._session_scope(session) as db:
-                    asst_msg = ConversationMessage(
-                        lead_id=lead_db_id,
-                        role="assistant",
-                        content=handover_notice,
-                        created_at=datetime.now(timezone.utc)
-                    )
-                    db.add(asst_msg)
-                    await db.commit()
-            return
+            except Exception as stg_err:
+                logger.error(f"Ошибка при продвижении этапа сделки #{amo_lead_id}: {stg_err}")
 
         reply_text = comm_resp.text
-
-        # 5.8. Автоматическое продвижение сделки по этапам воронки (0 -> 1 -> 2 -> 3) ДО записи Ответ ИИ и запуска Salesbot
-        try:
-            await self._advance_pipeline_stage(
-                account=account,
-                amo_lead_id=amo_lead_id,
-                subdomain=subdomain,
-                access_token=access_token,
-                amo_cf_values=amo_cf_values,
-                extracted_items=extracted_items_pre,
-                disabled_field_keys=disabled_field_keys_pre,
-                active_pipeline=active_pipeline,
-                lead_amo_data=lead_amo_data,
-            )
-        except Exception as stg_err:
-            logger.error(f"Ошибка при продвижении этапа сделки #{amo_lead_id}: {stg_err}")
 
         # 6. Внешние HTTP-вызовы: Запись в поле сделки и запуск Salesbot (БЕЗ сессии БД)
         reply_field_id = account.ai_reply_field_id

@@ -68,6 +68,7 @@ class LLMCommunicator:
         api_key: Optional[str] = None,
         qualification_prompt: Optional[str] = None,
         rules_prompt: Optional[str] = None,
+        force_handover: bool = False,
     ) -> CommunicatorResponse:
         """
         Генерация ответа клиенту на основе истории сообщений, мультимодальных вложений
@@ -86,7 +87,7 @@ class LLMCommunicator:
 
         # Проверка последнего сообщения пользователя на запрос оператора
         last_user_msg = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
-        is_handover = self._check_handover_intent(last_user_msg)
+        is_handover = self._check_handover_intent(last_user_msg) or bool(force_handover)
 
         # 1. Формирование блока уже известных данных о клиенте и сделке
         all_known = {}
@@ -152,6 +153,17 @@ class LLMCommunicator:
                 "5. Если в аудио/видео клиент явно просит позвать человека/оператора/менеджера, добавь в конце ответа маркер [[HANDOVER]]."
             )
 
+        handover_instruction = ""
+        if is_handover:
+            qualification_instruction = ""
+            handover_instruction = (
+                "\n\nРЕЖИМ ПЕРЕВОДА НА МЕНЕДЖЕРА (HANDOVER):\n"
+                "Диалог сейчас передаётся живому специалисту/менеджеру. "
+                "Ответь клиенту СТРОГО НА ЯЗЫКЕ КЛИЕНТА (если клиент пишет на узбекском — ответь на узбекском языке; если на русском — на русском): "
+                "вежливо и естественно сообщи, что ты передаёшь его обращение специалисту и менеджер скоро подключится к диалогу. "
+                "Новых анкетных вопросов задавать НЕ нужно."
+            )
+
         # 3. Формирование блока Базы знаний и каталога продуктов
         knowledge_instruction = ""
         has_active_cache = bool(gemini_cache_name and knowledge_mode == "gemini_cache")
@@ -181,6 +193,7 @@ class LLMCommunicator:
             f"{known_info}"
             f"{qualification_instruction}"
             f"{comment_instruction}"
+            f"{handover_instruction}"
             f"{media_instruction}\n\n"
             f"{base_rules_prompt}"
         )

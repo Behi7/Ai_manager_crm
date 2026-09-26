@@ -167,6 +167,13 @@ class TestStageProgression(unittest.IsolatedAsyncioTestCase):
             subdomain="testsub", access_token="tok", lead_id=12345, status_id=50
         )
         self.assertTrue(lead_obj.handover_required)
+        # Проверяем, что клиенту отправляется ответ Общителя (на языке клиента), а НЕ захардкоженная русская строка
+        mock_amo.patch_lead_custom_fields.assert_awaited_with(
+            subdomain="testsub",
+            access_token="tok",
+            lead_id=12345,
+            fields=[{"field_id": 555, "values": [{"value": "Ответ ИИ"}]}],
+        )
 
     async def test_skips_reply_when_stage_not_enabled(self):
         mock_amo, mock_comm, _ = await self._run_pipeline_with_state(
@@ -176,3 +183,15 @@ class TestStageProgression(unittest.IsolatedAsyncioTestCase):
             lead_filled=True,
         )
         mock_comm.generate_reply.assert_not_called()
+
+    async def test_replies_when_stage_4_checkbox_is_enabled(self):
+        mock_amo, mock_comm, _ = await self._run_pipeline_with_state(
+            initial_status_id=50,  # На этапе 50 (Handover) галочка ВКЛЮЧЕНА
+            enabled_stage_ids=[10, 20, 30, 40, 50],
+            contact_filled=True,
+            lead_filled=True,
+            handover_requested=False,
+        )
+        mock_comm.generate_reply.assert_awaited_once()
+        mock_amo.run_salesbot.assert_awaited_once()
+
