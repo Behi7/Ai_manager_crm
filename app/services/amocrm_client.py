@@ -4,7 +4,7 @@ import socket
 import logging
 import time
 from typing import Any, Dict, List, Optional, Union, Tuple
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 import httpx
 
 logger = logging.getLogger("AmoCRMClient")
@@ -41,6 +41,8 @@ class AmoCRMClient:
         self.rate_limiter = AmoCRMRateLimiter(min_interval=0.15)
         self._client: Optional[httpx.AsyncClient] = None
         self._client_lock = asyncio.Lock()
+        self.last_status_code: int = 400
+        self.last_error_transient: bool = False
 
     ALLOWED_DOMAINS = (".amocrm.ru", ".amocrm.com", ".kommo.com")
 
@@ -398,21 +400,35 @@ class AmoCRMClient:
             payload["name"] = lead_name_val
         if filtered_cf:
             payload["custom_fields_values"] = filtered_cf
-        try:
-            client = await self.get_client()
-            resp = await client.patch(url, json=payload, headers=self._headers(t))
-            self._check_http_auth_or_billing(resp, subdomain)
-            if resp.status_code in [200, 201]:
-                logger.info(f"📊 Экстрактор обновил {len(custom_fields_values)} полей в сделке #{lead_id} ({subdomain})")
-                return True
-            else:
+        for attempt in range(1, 3):
+            try:
+                client = await self.get_client()
+                self.last_error_transient = False
+                resp = await client.patch(url, json=payload, headers=self._headers(t))
+                self._check_http_auth_or_billing(resp, subdomain)
+                self.last_status_code = resp.status_code
+                self.last_error_transient = resp.status_code in (429, 500, 502, 503, 504)
+                if resp.status_code in [200, 201]:
+                    logger.info(f"📊 Экстрактор обновил {len(custom_fields_values)} полей в сделке #{lead_id} ({subdomain})")
+                    return True
+                if resp.status_code in (429, 500, 502, 503, 504) and attempt == 1:
+                    logger.warning(f"amoCRM вернул HTTP {resp.status_code} при обновлении сделки #{lead_id}, повтор через 1с...")
+                    await asyncio.sleep(1.0)
+                    continue
                 logger.error(f"Ошибка обновления полей Экстрактором #{lead_id}: HTTP {resp.status_code} {resp.text}")
                 return False
-        except AmoCRMAuthOrBillingError:
-            raise
-        except (httpx.RequestError, httpx.TimeoutException) as net_err:
-            logger.error(f"Сетевая ошибка в patch_lead_custom_fields (#{lead_id}, {subdomain}): {net_err}")
-            return False
+            except AmoCRMAuthOrBillingError:
+                raise
+            except (httpx.RequestError, httpx.TimeoutException) as net_err:
+                self.last_status_code = 0
+                self.last_error_transient = True
+                if attempt == 1:
+                    logger.warning(f"Сетевая ошибка в patch_lead_custom_fields (#{lead_id}, {subdomain}), повтор через 1с: {net_err}")
+                    await asyncio.sleep(1.0)
+                    continue
+                logger.error(f"Сетевая ошибка в patch_lead_custom_fields (#{lead_id}, {subdomain}): {net_err}")
+                return False
+        return False
 
     async def patch_contact_custom_fields(
         self,
@@ -446,21 +462,35 @@ class AmoCRMClient:
             payload["name"] = contact_name_val
         if filtered_cf:
             payload["custom_fields_values"] = filtered_cf
-        try:
-            client = await self.get_client()
-            resp = await client.patch(url, json=payload, headers=self._headers(t))
-            self._check_http_auth_or_billing(resp, subdomain)
-            if resp.status_code in [200, 201]:
-                logger.info(f"📊 Экстрактор обновил {len(fields)} полей в контакте #{contact_id} ({subdomain})")
-                return True
-            else:
+        for attempt in range(1, 3):
+            try:
+                client = await self.get_client()
+                self.last_error_transient = False
+                resp = await client.patch(url, json=payload, headers=self._headers(t))
+                self._check_http_auth_or_billing(resp, subdomain)
+                self.last_status_code = resp.status_code
+                self.last_error_transient = resp.status_code in (429, 500, 502, 503, 504)
+                if resp.status_code in [200, 201]:
+                    logger.info(f"📊 Экстрактор обновил {len(fields)} полей в контакте #{contact_id} ({subdomain})")
+                    return True
+                if resp.status_code in (429, 500, 502, 503, 504) and attempt == 1:
+                    logger.warning(f"amoCRM вернул HTTP {resp.status_code} при обновлении контакта #{contact_id}, повтор через 1с...")
+                    await asyncio.sleep(1.0)
+                    continue
                 logger.error(f"Ошибка обновления полей контакта #{contact_id}: HTTP {resp.status_code} {resp.text}")
                 return False
-        except AmoCRMAuthOrBillingError:
-            raise
-        except (httpx.RequestError, httpx.TimeoutException) as net_err:
-            logger.error(f"Сетевая ошибка в patch_contact_custom_fields (#{contact_id}, {subdomain}): {net_err}")
-            return False
+            except AmoCRMAuthOrBillingError:
+                raise
+            except (httpx.RequestError, httpx.TimeoutException) as net_err:
+                self.last_status_code = 0
+                self.last_error_transient = True
+                if attempt == 1:
+                    logger.warning(f"Сетевая ошибка в patch_contact_custom_fields (#{contact_id}, {subdomain}), повтор через 1с: {net_err}")
+                    await asyncio.sleep(1.0)
+                    continue
+                logger.error(f"Сетевая ошибка в patch_contact_custom_fields (#{contact_id}, {subdomain}): {net_err}")
+                return False
+        return False
 
     async def run_salesbot(
         self,
@@ -482,21 +512,32 @@ class AmoCRMClient:
             "entity_id": int(entity_id),
             "entity_type": entity_type
         }
-        try:
-            client = await self.get_client()
-            resp = await client.post(url, json=payload, headers=self._headers(t))
-            self._check_http_auth_or_billing(resp, subdomain)
-            if resp.status_code == 202:
-                logger.info(f"🤖 Запущен Salesbot #{bot_id} для {entity_type} #{entity_id} ({subdomain})")
-                return True
-            else:
+        for attempt in range(1, 3):
+            try:
+                client = await self.get_client()
+                resp = await client.post(url, json=payload, headers=self._headers(t))
+                self._check_http_auth_or_billing(resp, subdomain)
+                if resp.status_code == 202:
+                    logger.info(f"🤖 Запущен Salesbot #{bot_id} для {entity_type} #{entity_id} ({subdomain})")
+                    return True
+                if resp.status_code in (429, 500, 502, 503, 504) and attempt == 1:
+                    logger.warning(f"amoCRM вернул HTTP {resp.status_code} при запуске Salesbot #{bot_id}, повтор через 1с...")
+                    await asyncio.sleep(1.0)
+                    continue
                 logger.error(f"Ошибка запуска Salesbot #{bot_id}: HTTP {resp.status_code} {resp.text}")
                 return False
-        except AmoCRMAuthOrBillingError:
-            raise
-        except (httpx.RequestError, httpx.TimeoutException) as net_err:
-            logger.error(f"Сетевая ошибка в run_salesbot (bot={bot_id}, {subdomain}): {net_err}")
-            return False
+            except AmoCRMAuthOrBillingError:
+                raise
+            except (httpx.RequestError, httpx.TimeoutException) as net_err:
+                self.last_status_code = 0
+                self.last_error_transient = True
+                if attempt == 1:
+                    logger.warning(f"Сетевая ошибка в run_salesbot (bot={bot_id}, {subdomain}), повтор через 1с: {net_err}")
+                    await asyncio.sleep(1.0)
+                    continue
+                logger.error(f"Сетевая ошибка в run_salesbot (bot={bot_id}, {subdomain}): {net_err}")
+                return False
+        return False
 
     async def patch_lead_status(
         self,
@@ -742,45 +783,48 @@ class AmoCRMClient:
 
         # Нормализация относительных ссылок
         target_url = url
-        if target_url.startswith("/") and subdomain:
-            target_url = f"{self._base_url(subdomain)}{target_url}"
+        async def _validate_safe_url(candidate_url: str) -> Tuple[Optional[str], bool]:
+            resolved = candidate_url.strip()
+            if resolved.startswith("/") and subdomain:
+                resolved = f"{self._base_url(subdomain)}{resolved}"
+            p = urlparse(resolved)
+            if p.scheme not in ("https", "http") or not p.hostname:
+                logger.warning(f"Отклонена некорректная схема URL вложения: {resolved}")
+                return None, False
+            h_lower = p.hostname.lower()
+            if h_lower in ("localhost", "0.0.0.0") or h_lower.endswith((".local", ".internal", ".lan")):
+                logger.error(f"Заблокирована попытка обращения к локальному хосту ({resolved})")
+                return None, False
+            try:
+                d_ip = ipaddress.ip_address(h_lower)
+                if d_ip.is_private or d_ip.is_loopback or d_ip.is_link_local or d_ip.is_reserved or d_ip.is_multicast:
+                    logger.error(f"Заблокирована попытка обращения к внутреннему IP {d_ip} ({resolved})")
+                    return None, False
+            except ValueError:
+                pass
+            is_amo = (
+                h_lower.endswith("amocrm.ru") or
+                "amojo" in h_lower or
+                h_lower.endswith("amocrm.com") or
+                h_lower.endswith("kommo.com")
+            )
+            try:
+                a_info = await asyncio.get_running_loop().getaddrinfo(p.hostname, None)
+                for item in a_info:
+                    ip_obj = ipaddress.ip_address(item[4][0])
+                    if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local or ip_obj.is_reserved or ip_obj.is_multicast:
+                        logger.error(f"Заблокирована попытка обращения к внутреннему IP {ip_obj} ({resolved})")
+                        return None, False
+            except socket.gaierror:
+                if not is_amo:
+                    logger.warning(f"Не удалось разрешить DNS для хоста вложения: {p.hostname}")
+                    return None, False
+            return resolved, is_amo
 
-        parsed = urlparse(target_url)
-        if parsed.scheme not in ("https", "http") or not parsed.hostname:
-            logger.warning(f"Отклонена некорректная схема URL вложения: {target_url}")
+        validated_url, is_amocrm_domain = await _validate_safe_url(target_url)
+        if not validated_url:
             return None
-
-        hostname_lower = parsed.hostname.lower()
-        if hostname_lower in ("localhost", "0.0.0.0") or hostname_lower.endswith((".local", ".internal", ".lan")):
-            logger.error(f"Заблокирована попытка обращения к локальному хосту ({target_url})")
-            return None
-
-        try:
-            direct_ip = ipaddress.ip_address(hostname_lower)
-            if direct_ip.is_private or direct_ip.is_loopback or direct_ip.is_link_local or direct_ip.is_reserved or direct_ip.is_multicast:
-                logger.error(f"Заблокирована попытка обращения к внутреннему IP {direct_ip} ({target_url})")
-                return None
-        except ValueError:
-            pass
-
-        is_amocrm_domain = (
-            hostname_lower.endswith("amocrm.ru") or
-            "amojo" in hostname_lower or
-            hostname_lower.endswith("amocrm.com") or
-            hostname_lower.endswith("kommo.com")
-        )
-
-        try:
-            addr_info = await asyncio.get_running_loop().getaddrinfo(parsed.hostname, None)
-            for item in addr_info:
-                ip_obj = ipaddress.ip_address(item[4][0])
-                if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local or ip_obj.is_reserved or ip_obj.is_multicast:
-                    logger.error(f"Заблокирована попытка обращения к внутреннему IP {ip_obj} ({target_url})")
-                    return None
-        except socket.gaierror:
-            if not is_amocrm_domain:
-                logger.warning(f"Не удалось разрешить DNS для хоста вложения: {parsed.hostname}")
-                return None
+        target_url = validated_url
 
         headers = {}
         if token and is_amocrm_domain:
@@ -790,37 +834,54 @@ class AmoCRMClient:
             client = await self.get_client()
 
             async def _stream_download(request_headers: dict) -> Tuple[Optional[bytes], Optional[str], int]:
-                try:
-                    async with client.stream("GET", target_url, headers=request_headers) as response:
-                        if response.status_code != 200:
-                            return None, None, response.status_code
+                current_url = target_url
+                current_headers = dict(request_headers)
+                for _hop in range(4):
+                    try:
+                        async with client.stream("GET", current_url, headers=current_headers, follow_redirects=False) as response:
+                            if response.status_code in (301, 302, 303, 307, 308):
+                                loc = response.headers.get("location", "")
+                                if not loc:
+                                    return None, None, response.status_code
+                                next_url_raw = urljoin(current_url, loc)
+                                safe_next_url, next_is_amo = await _validate_safe_url(next_url_raw)
+                                if not safe_next_url:
+                                    logger.error(f"Заблокирован небезопасный HTTP-редирект при скачивании вложения: {next_url_raw}")
+                                    return None, None, 403
+                                current_url = safe_next_url
+                                if not next_is_amo and "Authorization" in current_headers:
+                                    current_headers.pop("Authorization", None)
+                                continue
+                            if response.status_code != 200:
+                                return None, None, response.status_code
 
-                        content_length_str = response.headers.get("content-length")
-                        if content_length_str:
-                            try:
-                                if int(content_length_str) > max_size_bytes:
+                            content_length_str = response.headers.get("content-length")
+                            if content_length_str:
+                                try:
+                                    if int(content_length_str) > max_size_bytes:
+                                        logger.warning(
+                                            f"Размер вложения {current_url} ({int(content_length_str) / 1024 / 1024:.2f} МБ) превышает лимит {max_size_bytes / 1024 / 1024:.1f} МБ"
+                                        )
+                                        return None, None, 413
+                                except ValueError:
+                                    pass
+
+                            chunks = []
+                            total_bytes = 0
+                            async for chunk in response.aiter_bytes(chunk_size=65536):
+                                total_bytes += len(chunk)
+                                if total_bytes > max_size_bytes:
                                     logger.warning(
-                                        f"Размер вложения {target_url} ({int(content_length_str) / 1024 / 1024:.2f} МБ) превышает лимит {max_size_bytes / 1024 / 1024:.1f} МБ"
+                                        f"Размер потока вложения {current_url} превысил лимит {max_size_bytes / 1024 / 1024:.1f} МБ во время скачивания"
                                     )
                                     return None, None, 413
-                            except ValueError:
-                                pass
+                                chunks.append(chunk)
 
-                        chunks = []
-                        total_bytes = 0
-                        async for chunk in response.aiter_bytes(chunk_size=65536):
-                            total_bytes += len(chunk)
-                            if total_bytes > max_size_bytes:
-                                logger.warning(
-                                    f"Размер потока вложения {target_url} превысил лимит {max_size_bytes / 1024 / 1024:.1f} МБ во время скачивания"
-                                )
-                                return None, None, 413
-                            chunks.append(chunk)
-
-                        return b"".join(chunks), response.headers.get("content-type", ""), 200
-                except (httpx.RequestError, httpx.TimeoutException) as stream_err:
-                    logger.warning(f"Сетевая ошибка стриминга вложения {target_url}: {stream_err}")
-                    return None, None, 500
+                            return b"".join(chunks), response.headers.get("content-type", ""), 200
+                    except (httpx.RequestError, httpx.TimeoutException) as stream_err:
+                        logger.warning(f"Сетевая ошибка стриминга вложения {current_url}: {stream_err}")
+                        return None, None, 500
+                return None, None, 310
 
             content, content_type, status_code = await _stream_download(headers)
             # Если с заголовком авторизации на стороннем CDN/S3 получили 400/401/403, пробуем без него

@@ -180,13 +180,13 @@ class LLMExtractor:
         for cur_model in models_to_try:
             is_fallback = (cur_model != model_name)
             url = GEMINI_API_URL.format(model=cur_model)
-            params = {"key": effective_api_key}
+            headers = {"x-goog-api-key": effective_api_key}
 
             # До 2 попыток на каждую модель (повтор при 503/429/5xx/сетевом сбое)
             for attempt in range(1, 3):
                 try:
                     client = await gemini_http_client.get_client()
-                    resp = await client.post(url, params=params, json=body)
+                    resp = await client.post(url, headers=headers, json=body)
                     if resp.status_code == 200:
                         data = resp.json()
                         candidates = data.get("candidates", [])

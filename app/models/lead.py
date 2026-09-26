@@ -29,8 +29,8 @@ class Lead(Base):
     )
 
     account: Mapped["Account"] = relationship("Account", back_populates="leads")
-    messages: Mapped[List["ConversationMessage"]] = relationship("ConversationMessage", back_populates="lead", cascade="all, delete-orphan", lazy="selectin")
-    extraction_logs: Mapped[List["ExtractionLog"]] = relationship("ExtractionLog", back_populates="lead", cascade="all, delete-orphan", lazy="selectin")
+    messages: Mapped[List["ConversationMessage"]] = relationship("ConversationMessage", back_populates="lead", cascade="all, delete-orphan", lazy="noload")
+    extraction_logs: Mapped[List["ExtractionLog"]] = relationship("ExtractionLog", back_populates="lead", cascade="all, delete-orphan", lazy="noload")
 
     __table_args__ = (
         UniqueConstraint("account_id", "amo_lead_id", name="uq_lead_account_amo_id"),

@@ -413,8 +413,14 @@ class DeliveryService:
             recent_messages = list(reversed(db_messages))
             history_payload = [{"role": m.role, "content": m.content} for m in recent_messages]
 
-            ext_hist_stmt = select(ExtractionLog).where(ExtractionLog.lead_id == lead_db_id).order_by(ExtractionLog.created_at.asc())
-            ext_hist_rows = (await db.execute(ext_hist_stmt)).scalars().all()
+            ext_hist_stmt = (
+                select(ExtractionLog)
+                .where(ExtractionLog.lead_id == lead_db_id)
+                .order_by(ExtractionLog.created_at.desc())
+                .limit(30)
+            )
+            ext_hist_all = (await db.execute(ext_hist_stmt)).scalars().all()
+            ext_hist_rows = list(reversed(ext_hist_all)) if isinstance(ext_hist_all, (list, tuple)) else []
             previously_extracted_raw: Dict[str, str] = {}
             if isinstance(ext_hist_rows, (list, tuple)):
                 for er in ext_hist_rows:
@@ -748,7 +754,14 @@ class DeliveryService:
         if delivery_state is not None:
             delivery_state['bot_ok'] = bool(bot_ok)
         if not bot_ok:
-            logger.warning(f"Salesbot {account.bot_id} вернул ошибку при запуске для лида {amo_lead_id}")
+            logger.error(f"Salesbot {account.bot_id} вернул ошибку при запуске для лида {amo_lead_id}")
+            await amocrm_client.create_operator_task(
+                subdomain=subdomain,
+                access_token=access_token,
+                element_id=amo_lead_id,
+                text=f"Ошибка запуска Salesbot #{account.bot_id} при отправке ответа ИИ. Проверьте привязку бота."
+            )
+            raise RuntimeError(f"Salesbot {account.bot_id} execution failed for lead {amo_lead_id}")
 
         # 7. Короткая сессия БД №2: Сохраняем ответ ассистента
         async with self._session_scope(session) as db:
@@ -844,12 +857,16 @@ class DeliveryService:
                                 fields=[item]
                             )
                             if not single_ok:
-                                logger.error(f"Поле #{fid} отклонено amoCRM (вероятно, удалено). Автоматически отключаем маппинг.")
-                                disabled_field_keys.add(("lead", fid))
-                                for fm in account.field_mappings:
-                                    fm_ent = fm.entity_type if isinstance(getattr(fm, "entity_type", None), str) and fm.entity_type in ("lead", "contact") else "lead"
-                                    if fm.amo_field_id == fid and fm_ent == "lead":
-                                        fm.is_enabled = False
+                                last_code = getattr(amocrm_client, "last_status_code", 400)
+                                if last_code == 400:
+                                    logger.error(f"Поле #{fid} отклонено amoCRM (HTTP 400, вероятно, удалено). Автоматически отключаем маппинг.")
+                                    disabled_field_keys.add(("lead", fid))
+                                    for fm in account.field_mappings:
+                                        fm_ent = fm.entity_type if isinstance(getattr(fm, "entity_type", None), str) and fm.entity_type in ("lead", "contact") else "lead"
+                                        if fm.amo_field_id == fid and fm_ent == "lead":
+                                            fm.is_enabled = False
+                                else:
+                                    logger.warning(f"Временная ошибка amoCRM (status={last_code}) при сохранении поля сделки #{fid}. Маппинг НЕ отключаем.")
 
                 target_contact_id = contact_id or (contact_amo_data.get("id") if contact_amo_data else None)
                 if contact_fields_to_update:
@@ -874,12 +891,16 @@ class DeliveryService:
                                     fields=[item]
                                 )
                                 if not single_ok:
-                                    logger.error(f"Поле контакта #{fid} отклонено amoCRM. Отключаем маппинг.")
-                                    disabled_field_keys.add(("contact", fid))
-                                    for fm in account.field_mappings:
-                                        fm_ent = fm.entity_type if isinstance(getattr(fm, "entity_type", None), str) and fm.entity_type in ("lead", "contact") else "lead"
-                                        if fm.amo_field_id == fid and fm_ent == "contact":
-                                            fm.is_enabled = False
+                                    last_code = getattr(amocrm_client, "last_status_code", 400)
+                                    if last_code == 400:
+                                        logger.error(f"Поле контакта #{fid} отклонено amoCRM (HTTP 400). Отключаем маппинг.")
+                                        disabled_field_keys.add(("contact", fid))
+                                        for fm in account.field_mappings:
+                                            fm_ent = fm.entity_type if isinstance(getattr(fm, "entity_type", None), str) and fm.entity_type in ("lead", "contact") else "lead"
+                                            if fm.amo_field_id == fid and fm_ent == "contact":
+                                                fm.is_enabled = False
+                                    else:
+                                        logger.warning(f"Временная ошибка amoCRM (status={last_code}) при сохранении поля контакта #{fid}. Маппинг НЕ отключаем.")
                     else:
                         logger.warning(f"Нет contact_id для записи полей контакта в лиде #{amo_lead_id}.")
 
