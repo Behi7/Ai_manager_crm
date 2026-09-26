@@ -471,36 +471,105 @@ class DeliveryService:
 
         ai_config = account.ai_config
 
-        # 4.1. СНАЧАЛА запускаем Экстрактор по входящему сообщению и медиа ДО генерации ответа Общителя,
-        # чтобы все данные, которые клиент сообщил в текущем сообщении, сразу попали в known_fields и ушли из target_fields!
+        # 4.1. СНАЧАЛА запускаем Экстрактор по входящему сообщению и медиа ДО генерации ответа Общителя.
+        # Если во время работы Экстрактора клиент прислал ещё сообщение(я) в буфер Redis —
+        # забираем их, объединяем с текущим контекстом (текст + media_parts) и повторно запускаем Экстрактор,
+        # чтобы Общитель получил 100% отфильтрованные данные и весь склеенный диалог!
         extracted_items_pre: List[Dict[str, Any]] = []
         disabled_field_keys_pre: set = set()
-        try:
-            extracted_items_pre, disabled_field_keys_pre = await self._run_extractor_step(
-                session=session,
-                account=account,
-                account_uuid=account_uuid,
-                amo_lead_id=amo_lead_id,
-                lead=lead,
-                lead_db_id=lead_db_id,
-                current_stuck_count=current_stuck_count,
-                subdomain=subdomain,
-                access_token=access_token,
-                ai_config=ai_config,
-                history_payload=history_payload,
-                reply_text="",
-                amo_cf_values=amo_cf_values,
-                media_parts=media_parts,
-                contact_id=contact_id,
-                contact_amo_data=contact_amo_data,
-                active_pipeline=active_pipeline,
-                lead_amo_data=lead_amo_data,
-                skip_stage_advance=True,
+        for _ext_pass in range(3):
+            try:
+                cur_items, cur_disabled = await self._run_extractor_step(
+                    session=session,
+                    account=account,
+                    account_uuid=account_uuid,
+                    amo_lead_id=amo_lead_id,
+                    lead=lead,
+                    lead_db_id=lead_db_id,
+                    current_stuck_count=current_stuck_count,
+                    subdomain=subdomain,
+                    access_token=access_token,
+                    ai_config=ai_config,
+                    history_payload=history_payload,
+                    reply_text="",
+                    amo_cf_values=amo_cf_values,
+                    media_parts=media_parts,
+                    contact_id=contact_id,
+                    contact_amo_data=contact_amo_data,
+                    active_pipeline=active_pipeline,
+                    lead_amo_data=lead_amo_data,
+                    skip_stage_advance=True,
+                )
+                if cur_items:
+                    extracted_items_pre.extend(cur_items)
+                    current_stuck_count = 0
+                if cur_disabled:
+                    disabled_field_keys_pre.update(cur_disabled)
+            except BaseException as ext_err:
+                logger.error(f"Ошибка/таймаут на этапе предварительной работы Экстрактора для лида {amo_lead_id}: {ext_err}")
+                break
+
+            try:
+                has_more = await debounce_service.has_buffered_messages(account_id_str, lead_id_str)
+            except Exception:
+                has_more = False
+            if not has_more:
+                break
+
+            extra_buffered = await debounce_service.pop_buffered_messages(account_id_str, lead_id_str)
+            if not isinstance(extra_buffered, dict):
+                break
+
+            extra_texts = extra_buffered.get("texts") or []
+            extra_atts = extra_buffered.get("attachments") or []
+            if not extra_texts and not extra_atts:
+                break
+
+            logger.info(
+                f"🔄 Во время работы Экстрактора от лида #{amo_lead_id} поступило новое сообщение в буфер "
+                f"(texts={len(extra_texts)}, media={len(extra_atts)}). Объединяем и запускаем Экстрактор повторно!"
             )
-            if extracted_items_pre:
-                current_stuck_count = 0
-        except BaseException as ext_err:
-            logger.error(f"Ошибка/таймаут на этапе предварительной работы Экстрактора для лида {amo_lead_id}: {ext_err}")
+
+            if extra_texts:
+                buffered_texts.extend(extra_texts)
+            if extra_atts:
+                buffered_attachments.extend(extra_atts)
+                for att in extra_atts:
+                    link = att.get("link")
+                    if not link:
+                        continue
+                    downloaded = await amocrm_client.download_attachment(
+                        url=link,
+                        token=access_token,
+                        subdomain=subdomain,
+                        hint_type=att.get("type"),
+                        hint_filename=att.get("file_name"),
+                    )
+                    if downloaded and downloaded.get("data_bytes"):
+                        b64_data = base64.b64encode(downloaded["data_bytes"]).decode("utf-8")
+                        media_parts.append({
+                            "mime_type": downloaded["mime_type"],
+                            "data_b64": b64_data,
+                            "file_name": downloaded["file_name"],
+                        })
+
+            new_text_chunk = "\n".join(extra_texts).strip()
+            if new_text_chunk:
+                if combined_user_text == "[Входящее медиасообщение]":
+                    combined_user_text = new_text_chunk
+                else:
+                    combined_user_text = f"{combined_user_text}\n{new_text_chunk}".strip()
+                if history_payload and history_payload[-1].get("role") == "user":
+                    history_payload[-1]["content"] = combined_user_text
+                else:
+                    history_payload.append({"role": "user", "content": combined_user_text})
+                async with self._session_scope(session) as db:
+                    msg_obj = (
+                        await db.execute(select(ConversationMessage).where(ConversationMessage.id == user_msg_id))
+                    ).scalar_one_or_none()
+                    if msg_obj:
+                        msg_obj.content = combined_user_text
+                        await db.commit()
 
         # 4.2. Формируем known_fields и target_fields уже с учётом только что извлечённых данных
         known_fields: Dict[str, str] = {}
